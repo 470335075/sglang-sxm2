@@ -19,6 +19,8 @@ def _qsa_mqa_kernel_dtype(device: torch.device) -> str:
     return "bfloat16"
 
 
+from sglang.srt.utils.common import is_hip
+
 try:
     import flashinfer.comm  # noqa: F401
 except ImportError:
@@ -375,11 +377,15 @@ def tilelang_qsa_mqa_decode(
     )
     if not q.shape[0] or not max_model_len:
         return logits
-    # The validated MMA layout requires N (the Q-head dimension) to be a
-    # multiple of eight; the SM70 (V100) MMA path additionally needs a
-    # multiple of 16. Zero-padding preserves the weight-free head sum.
+    # CUDA MMA accepts an eight-wide N dimension. ROCm MFMA and the
+    # SM70 (V100) MMA path need sixteen. Zero-padding preserves the
+    # weight-free head sum. The kernel dtype is fp16 on SM70.
     query_heads, head_dim = q.shape[1:]
-    align = 16 if get_device_capability(q.device.index)[0] < 8 else 8
+    align = (
+        16
+        if is_hip() or get_device_capability(q.device.index)[0] < 8
+        else 8
+    )
     kernel_heads = max(align, ((query_heads + align - 1) // align) * align)
     dtype = _qsa_mqa_kernel_dtype(q.device)
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16

@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 from sglang.kernels.ops.activation.activation import (
+    silu_and_mul_with_activation_rounding,
     silu_and_mul_with_activation_rounding_,
 )
 from sglang.kernels.ops.diffusion import (
@@ -67,7 +68,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
 )
 from sglang.multimodal_gen.runtime.layers.usp import _ring_attention_varlen
 from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
-from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
+from sglang.multimodal_gen.runtime.managers.forward_context import (
+    get_forward_context,
+)
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     LayerwiseOffloadableModuleMixin,
     is_layerwise_offloaded_module,
@@ -92,6 +95,7 @@ from sglang.multimodal_gen.runtime.platforms import (
     current_platform,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.precision import volta_compute_dtype
 from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph import (
     eager_on_graph,
 )
@@ -334,7 +338,8 @@ def _copy_grouped_qkv_tp_shard(
         or getattr(param, "is_sharded_weight", False)
         or getattr(param, "packed_dim", None) is not None
         or param.dtype != loaded_weight.dtype
-        or param.dtype not in (_BF16_DTYPE, torch.float8_e4m3fn)
+        or param.dtype
+        not in (_BF16_DTYPE, torch.float16, torch.float8_e4m3fn)
         or not param.is_contiguous()
         or not loaded_weight.is_contiguous()
     ):
@@ -357,11 +362,54 @@ def _copy_grouped_qkv_tp_shard(
     return True
 
 
-def _norm(size: int, *, eps: float, dtype: torch.dtype = _BF16_DTYPE) -> nn.RMSNorm:
-    # RMSNorm uses fp32 accumulation with bf16 inputs and outputs.
-    # torch.nn.RMSNorm upcasts reduced-precision inputs for the variance
-    # reduction, matching that accumulation semantic.
+def _norm(
+    size: int, *, eps: float, dtype: torch.dtype | None = None
+) -> nn.RMSNorm:
+    # RMSNorm uses fp32 accumulation with reduced-precision inputs and outputs.
+    # torch.nn.RMSNorm upcasts those inputs for the variance reduction.
+    if dtype is None:
+        dtype = volta_compute_dtype()
     return nn.RMSNorm(size, eps=eps, dtype=dtype)
+
+
+def _packed_stream_dtype() -> torch.dtype:
+    """Dtype of the packed residual stream.
+
+    Volta runs the GEMM and attention kernels in fp16, but the residual
+    exceeds the fp16 range after the first few blocks. An fp16 inf then
+    comes back from RMSNorm as NaN and full attention spreads it to every
+    token. Keep the stream in fp32 and cast only at those kernel boundaries.
+    """
+    dtype = volta_compute_dtype()
+    if dtype == torch.float16:
+        return torch.float32
+    return dtype
+
+
+# Exact fp16 powers of two. Attention divides queries by 16 so the output
+# projection stays inside fp16; RMSNorm restores q/k, and v is multiplied
+# back after the projection. The MLP divides the gate by 16 and the fc2
+# input by 8, then multiplies both factors back onto the fp32 residual.
+_VOLTA_ATTN_PRESCALE = 16.0
+_VOLTA_MLP_GATE_SCALE = 16.0
+_VOLTA_MLP_FC2_SCALE = 8.0
+
+
+def _volta_fp16_kernels() -> bool:
+    return _packed_stream_dtype() == torch.float32
+
+
+def _apply_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Normalize, multiplying an fp32 stream by a reduced-precision weight.
+
+    A norm with no ``weight`` (the cache-dit contract stubs an ``Identity``)
+    is applied as-is.
+    """
+    weight = getattr(norm, "weight", None)
+    if weight is None or x.dtype == weight.dtype:
+        return norm(x)
+    variance = x.float().pow(2).mean(dim=-1, keepdim=True)
+    return x.float() * torch.rsqrt(variance + norm.eps) * weight.float()
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -394,9 +442,11 @@ def _modulate_scale_shift(
         and x.is_contiguous()
     ):
         return indexed_scale_shift_bf16_(x, shift, scale, indices)
-    return (
-        x * (1.0 + scale.index_select(0, indices)) + shift.index_select(0, indices)
-    ).to(dtype)
+    shift_rows = shift.index_select(0, indices)
+    scale_rows = scale.index_select(0, indices)
+    if dtype == torch.float32 or x.dtype == torch.float32:
+        return x.float() * (1.0 + scale_rows.float()) + shift_rows.float()
+    return (x * (1.0 + scale_rows) + shift_rows).to(dtype)
 
 
 def _modulate_gate(
@@ -422,19 +472,30 @@ def _modulate_gate(
         if allow_inplace:
             return indexed_gate_bf16_(x, gate, other, indices)
         return indexed_gate_bf16(x, gate, other, indices)
-    return (x + gate.index_select(0, indices) * other).to(dtype)
+    gate_rows = gate.index_select(0, indices)
+    if dtype == torch.float32 or x.dtype == torch.float32:
+        return x.float() + gate_rows.float() * other.float()
+    return (x + gate_rows * other).to(dtype)
 
 
 def _silu_mul(hidden: torch.Tensor, *, reuse_input: bool) -> torch.Tensor:
     if (
-        reuse_input
-        and hidden.is_cuda
+        hidden.is_cuda
         and hidden.dtype == _BF16_DTYPE
         and hidden.is_contiguous()
         and hidden.shape[-1] % 16 == 0
     ):
-        return silu_and_mul_with_activation_rounding_(hidden)
+        if reuse_input:
+            return silu_and_mul_with_activation_rounding_(hidden)
+        # Quantized fc2 needs contiguous rows, so keep the fused result out of
+        # the packed fc1 buffer while preserving the eager BF16 SiLU rounding.
+        return silu_and_mul_with_activation_rounding(hidden)
     gate, up = hidden.chunk(2, dim=-1)
+    if hidden.dtype == torch.float16 and _volta_fp16_kernels():
+        # silu(gate) * up exceeds fp16. Dividing the up branch by 16 is exact
+        # and leaves the product inside fp16; MLP.forward multiplies it back
+        # after fc2, in fp32.
+        return nn.functional.silu(gate) * (up * (1.0 / _VOLTA_MLP_GATE_SCALE))
     return nn.functional.silu(gate) * up
 
 
@@ -789,7 +850,7 @@ class MiniMaxH3Attention(nn.Module):
             [self.inner_dim] * 3,
             bias=False,
             gather_output=False,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=volta_compute_dtype(),
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -814,8 +875,8 @@ class MiniMaxH3Attention(nn.Module):
                 arch.attention_head_dim,
                 rope_dim,
                 True,
-                _BF16_DTYPE,
-                cache_dtype=_BF16_DTYPE,
+                volta_compute_dtype(),
+                cache_dtype=volta_compute_dtype(),
                 round_norm_before_rope=True,
             )
         )
@@ -824,7 +885,7 @@ class MiniMaxH3Attention(nn.Module):
             arch.hidden_size,
             bias=False,
             input_is_parallel=True,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=volta_compute_dtype(),
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
@@ -836,7 +897,7 @@ class MiniMaxH3Attention(nn.Module):
                 self.inner_dim,
                 bias=False,
                 gather_output=False,
-                params_dtype=_BF16_DTYPE,
+                params_dtype=volta_compute_dtype(),
                 quant_config=None,
                 prefix=f"{prefix}.to_gate_compress",
             )
@@ -852,7 +913,7 @@ class MiniMaxH3Attention(nn.Module):
         ):
             backend = get_attn_backend(
                 self.head_dim,
-                _BF16_DTYPE,
+                volta_compute_dtype(),
                 selected_attention_backend=AttentionBackendEnum.FA,
             )
         impl_cls = backend.get_impl_cls()
@@ -1074,7 +1135,18 @@ class MiniMaxH3Attention(nn.Module):
             )
 
         total = x.shape[0]
-        qkv, _ = self.qkv_proj(x if x_prequant is None else x_prequant)
+        attn_prescale = (
+            _volta_fp16_kernels()
+            and x_prequant is None
+            and self._attention_backend_enum
+            is not AttentionBackendEnum.HYBRID_WINDOW_ATTN_H3
+        )
+        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = (
+            x if x_prequant is None else x_prequant
+        )
+        if attn_prescale:
+            qkv_input = x * (1.0 / _VOLTA_ATTN_PRESCALE)
+        qkv, _ = self.qkv_proj(qkv_input)
         q, k, v = qkv.split(self.local_inner_dim, dim=-1)
         q = q.view(total, self.num_heads, self.head_dim)
         k = k.view(total, self.num_heads, self.head_dim)
@@ -1159,6 +1231,9 @@ class MiniMaxH3Attention(nn.Module):
         )
         out = out.reshape(total, self.num_heads * self.head_dim)
         out, _ = self.out_proj(out)
+        if attn_prescale:
+            # v was divided with the qkv input. q/k are restored by RMSNorm.
+            out = out.float() * _VOLTA_ATTN_PRESCALE
         return out
 
 
@@ -1178,7 +1253,7 @@ class MiniMaxH3MLP(nn.Module):
             [arch.ffn_hidden_size] * 2,
             bias=False,
             gather_output=False,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=volta_compute_dtype(),
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
@@ -1189,7 +1264,7 @@ class MiniMaxH3MLP(nn.Module):
             arch.hidden_size,
             bias=False,
             input_is_parallel=True,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=volta_compute_dtype(),
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
@@ -1215,7 +1290,15 @@ class MiniMaxH3MLP(nn.Module):
             out, _ = self.fc2(silu_mul_mxfp8(hidden))
             return out
         hidden = _silu_mul(hidden, reuse_input=self.reuse_fc1_activation)
+        # Gate was divided by 16 inside _silu_mul. fc2 grows that activation
+        # past the fp16 range, so divide once more by 8 and restore both
+        # factors after the GEMM.
+        restore_fc2 = hidden.dtype == torch.float16 and _volta_fp16_kernels()
+        if restore_fc2:
+            hidden = hidden * (1.0 / _VOLTA_MLP_FC2_SCALE)
         out, _ = self.fc2(hidden)
+        if restore_fc2:
+            out = out.float() * (_VOLTA_MLP_FC2_SCALE * _VOLTA_MLP_GATE_SCALE)
         return out
 
 
@@ -1251,7 +1334,9 @@ class MiniMaxH3AdalnProj(nn.Module):
         # AdaLN projections in FP32. Preserve that precision island to match
         # the published pruned implementation; these outputs intentionally do
         # not enter the BF16-only fused modulation kernels.
-        params_dtype = _FP32_DTYPE if arch.adaln_curve_grid is not None else _BF16_DTYPE
+        params_dtype = (
+            _FP32_DTYPE if arch.adaln_curve_grid is not None else volta_compute_dtype()
+        )
         self.linear = ColumnParallelLinear(
             arch.time_embed_dim,
             out_features,
@@ -1311,14 +1396,17 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
         cu_seqlens_host: tuple[int, ...] | None = None,
         max_seqlen: int,
     ) -> torch.Tensor:
+        stream_dtype = _packed_stream_dtype()
+        if x.dtype != stream_dtype:
+            x = x.to(stream_dtype)
         x = x + self.attn(
-            self.norm1(x),
+            _apply_norm(self.norm1, x),
             rope_cache=None,
             cu_seqlens=cu_seqlens,
             cu_seqlens_host=cu_seqlens_host,
             max_seqlen=max_seqlen,
         )
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.mlp(_apply_norm(self.norm2, x))
         return x
 
 
@@ -1358,7 +1446,7 @@ class MiniMaxH3TokenRefiner(nn.Module):
                 cu_seqlens_host=cu_seqlens_host,
                 max_seqlen=max_seqlen,
             )
-        return self.final_norm(x)
+        return _apply_norm(self.final_norm, x)
 
 
 class MiniMaxH3DiTBlock(nn.Module):
@@ -1420,11 +1508,14 @@ class MiniMaxH3DiTBlock(nn.Module):
                 raise ValueError("MiniMax H3 AdaLN cache parameters are required")
             adaln_params = self.adaln_proj(adaln_input)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_params
+        stream_dtype = _packed_stream_dtype()
+        if x.dtype != stream_dtype:
+            x = x.to(stream_dtype)
         # Cache-DiT retains the inputs to its Fn and Mn block ranges. Only the
         # first gated residual writes to that tensor; the second one operates on
         # a block-local buffer.
         residual = x
-        h = self.norm1(x)
+        h = _apply_norm(self.norm1, x)
         h_prequant = None
         if _accepts_mxfp8_input(self.attn.qkv_proj) and can_use_mxfp8_swizzled(h):
             # the bf16 modulated rows stay in h for the VDN branch projections
@@ -1434,7 +1525,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             h_prequant = (h_fp8, h_scales)
         else:
             h = _modulate_scale_shift(
-                h, shift_msa, scale_msa, combined_indices, dtype=_BF16_DTYPE
+                h, shift_msa, scale_msa, combined_indices, dtype=stream_dtype
             )
         h = self.attn(
             h,
@@ -1452,12 +1543,12 @@ class MiniMaxH3DiTBlock(nn.Module):
             gate_msa,
             h,
             combined_indices,
-            dtype=_BF16_DTYPE,
+            dtype=stream_dtype,
             allow_inplace=not self.preserve_input_for_cache_dit,
         )
 
         residual = x
-        h = self.norm2(x)
+        h = _apply_norm(self.norm2, x)
         if _accepts_mxfp8_input(self.mlp.fc1) and can_use_mxfp8_swizzled(h):
             _, h_fp8, h_scales = indexed_scale_shift_mxfp8_(
                 h, shift_mlp, scale_mlp, combined_indices, keep_bf16=False
@@ -1465,7 +1556,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             h = self.mlp((h_fp8, h_scales))
         else:
             h = _modulate_scale_shift(
-                h, shift_mlp, scale_mlp, combined_indices, dtype=_BF16_DTYPE
+                h, shift_mlp, scale_mlp, combined_indices, dtype=stream_dtype
             )
             h = self.mlp(h)
         # `residual` is block-local here (see above), so this stays in-place
@@ -1475,7 +1566,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             gate_mlp,
             h,
             combined_indices,
-            dtype=_BF16_DTYPE,
+            dtype=stream_dtype,
         )
 
 
@@ -1526,6 +1617,58 @@ class MiniMaxH3FinalLayer(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.audio_out",
         )
+        # Parallel Decoding Distillation heads, one per denoise step, loaded by
+        # `load_pdd_fused_heads`. None on every ordinary run.
+        self._pdd_heads: dict[str, torch.Tensor] | None = None
+
+    def load_pdd_fused_heads(self, path: str) -> None:
+        """Swap the two output heads for a per-step stack (PDD).
+
+        PDD replicates the final linear layer once per time interval and lets one
+        backbone evaluation advance a whole block of them; the per-block heads
+        fuse into one because H3's euler-eta0 step is linear in the predicted
+        velocity. `tools/fuse_minimax_h3_pdd_heads.py` does that fusion offline,
+        leaving one head per denoise step.
+        """
+        from safetensors import safe_open
+
+        with safe_open(path, "pt") as f:
+            heads = {k: f.get_tensor(k) for k in f.keys()}
+        steps = heads["video_out.weight"].shape[0]
+        for name in ("video_out", "audio_out"):
+            projection = getattr(self, name)
+            for suffix, shape in (
+                ("weight", (steps, projection.output_size, projection.input_size)),
+                ("bias", (steps, projection.output_size)),
+            ):
+                key = f"{name}.{suffix}"
+                if steps == 0 or heads[key].shape != shape:
+                    raise ValueError(f"MiniMax-H3 PDD {key} must have shape {shape}")
+                width = projection.output_size_per_partition
+                heads[key] = heads[key].narrow(1, projection.tp_rank * width, width)
+        self._pdd_heads = heads
+        logger.info("MiniMax-H3 PDD: %d fused output heads loaded from %s", steps, path)
+
+    def _pdd_project(self, h: torch.Tensor, name: str) -> torch.Tensor:
+        heads = self._pdd_heads
+        step = int(get_forward_context().current_timestep)
+        stack = heads[f"{name}.weight"]
+        if not 0 <= step < stack.shape[0]:
+            raise ValueError(
+                f"MiniMax-H3 PDD has {stack.shape[0]} fused heads but the loop is at "
+                f"step {step}; run with --num-inference-steps {stack.shape[0] + 1} "
+                "(H3 counts sigma grid points, so that is one more than the steps)."
+            )
+        weight = stack[step].to(device=h.device, dtype=h.dtype)
+        bias = heads[f"{name}.bias"][step].to(device=h.device, dtype=h.dtype)
+        return torch.nn.functional.linear(h, weight, bias)
+
+    def _project(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._pdd_heads is not None:
+            return self._pdd_project(h, "video_out"), self._pdd_project(h, "audio_out")
+        video, _ = self.video_out(h)
+        audio, _ = self.audio_out(h)
+        return video, audio
 
     def forward(
         self,
@@ -1551,16 +1694,15 @@ class MiniMaxH3FinalLayer(nn.Module):
             video = audio = None
             for start in range(0, x.shape[0], _MPS_MLP_TOKEN_CHUNK_SIZE):
                 stop = min(start + _MPS_MLP_TOKEN_CHUNK_SIZE, x.shape[0])
-                h = self.norm(x[start:stop])
+                h = _apply_norm(self.norm, x[start:stop])
                 h = _modulate_scale_shift(
                     h,
                     shift,
                     scale,
                     inverse_indices[start:stop],
-                    dtype=_BF16_DTYPE,
+                    dtype=_packed_stream_dtype(),
                 ).to(_FP32_DTYPE)
-                video_chunk, _ = self.video_out(h)
-                audio_chunk, _ = self.audio_out(h)
+                video_chunk, audio_chunk = self._project(h)
                 if video is None:
                     video = torch.empty(
                         (x.shape[0], video_chunk.shape[-1]),
@@ -1579,13 +1721,13 @@ class MiniMaxH3FinalLayer(nn.Module):
                 torch.mps.empty_cache()
             assert video is not None and audio is not None
             return video, audio
-        h = self.norm(x)
-        h = _modulate_scale_shift(h, shift, scale, inverse_indices, dtype=_BF16_DTYPE)
+        h = _apply_norm(self.norm, x)
+        h = _modulate_scale_shift(
+            h, shift, scale, inverse_indices, dtype=_packed_stream_dtype()
+        )
         # Preserve full precision through both final output projections.
         h = h.to(_FP32_DTYPE)
-        video, _ = self.video_out(h)
-        audio, _ = self.audio_out(h)
-        return video, audio
+        return self._project(h)
 
 
 def _reject_adaln_lora(names: list[str]) -> None:
@@ -1619,6 +1761,15 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
     _fsdp_mixed_dtype_params = True
     mps_stream_non_layer_weights = True
     _compile_conditions = [is_block]
+    _supported_attention_backends = {
+        AttentionBackendEnum.FA,
+        AttentionBackendEnum.TORCH_SDPA,
+        AttentionBackendEnum.TILELANG_FA_V100,
+        AttentionBackendEnum.CUBE_SPARSE_ATTN,
+        AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
+        AttentionBackendEnum.HYBRID_WINDOW_ATTN_H3,
+        AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
+    }
     param_names_mapping = _ARCH_DEFAULTS.param_names_mapping
     reverse_param_names_mapping = _ARCH_DEFAULTS.reverse_param_names_mapping
     lora_param_names_mapping = _ARCH_DEFAULTS.lora_param_names_mapping
@@ -1710,7 +1861,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 # 'match' replicates forward's bf16 cast bit-exactly; 'fp32'
                 # keeps the embedding in fp32 for the one-time projection.
                 if cache.precision == "match":
-                    out = out.to(_BF16_DTYPE)
+                    out = out.to(volta_compute_dtype())
                 return out
 
             cache.build(step_timesteps, embed=embed, keys=keys)
@@ -1919,7 +2070,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             arch.hidden_size,
             bias=True,
             gather_output=True,
-            params_dtype=_BF16_DTYPE,
+            params_dtype=volta_compute_dtype(),
             quant_config=quant_config,
             prefix="condition_proj",
         )
@@ -1985,6 +2136,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             prefix="final_layer",
             use_adaln_cache=self._adaln_precomputed,
         )
+        pdd_heads = envs.SGLANG_DIFFUSION_MINIMAX_H3_PDD_HEADS
+        if pdd_heads:
+            self.final_layer.load_pdd_fused_heads(pdd_heads)
         self.adaln_cache = (
             MiniMaxH3AdalnCache(
                 arch,
@@ -2042,7 +2196,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             )
         backend = get_attn_backend(
             self.arch.attention_head_dim,
-            _BF16_DTYPE,
+            volta_compute_dtype(),
             selected_attention_backend=selected_backend,
             attention_requirements=AttentionRequirements(packed_varlen=True),
         )
@@ -2147,7 +2301,10 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 "refiner cu_seqlens live text length must be in "
                 f"[1, {int(prompt_embeds.shape[0])}], got {text_len}"
             )
-        text_rows = prompt_embeds[:text_len].to(device=device, dtype=_BF16_DTYPE)
+        text_rows = prompt_embeds[:text_len].to(
+            device=device,
+            dtype=torch.float32 if _volta_fp16_kernels() else volta_compute_dtype(),
+        )
         true_refiner_cu = torch.stack(
             (
                 refiner_cu_seqlens[0],
@@ -2201,7 +2358,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             img_position_ids[:, row_start : row_start + local_seq_len]
         ).to(device)
         result = (
-            _rope_cos_sin_cache(rope_freqs, dtype=_BF16_DTYPE),
+            _rope_cos_sin_cache(rope_freqs, dtype=volta_compute_dtype()),
             torch.arange(
                 local_seq_len,
                 device=device,
@@ -2232,7 +2389,8 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build embeddings for one contiguous block-stack row shard.
 
-        Returns (decoder_input [S_local, H] bf16, t_emb [M, t_dim] fp32).
+        Returns (decoder_input [S_local, H], t_emb [M, t_dim] fp32).
+        The packed stream is fp32 on Volta and the kernel dtype elsewhere.
         """
         # BCG pads the prompt tensor only to stabilize its input signature.
         # Raw-input callers recover the live length from refiner metadata;
@@ -2257,7 +2415,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         text_pos = text_pos[:text_len]
         if refined_prompt_embeds_length is not None:
             text_embed = text_embeddings_selected[:text_len].to(
-                device=device, dtype=_BF16_DTYPE
+                device=device, dtype=_packed_stream_dtype()
             )
             if int(text_embed.shape[-1]) != self.hidden_size:
                 raise ValueError(
@@ -2277,7 +2435,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             used_len = text_len + int(img_pos.numel()) + int(audio_pos.numel())
             local_live_rows = min(max(used_len - row_start, 0), local_seq_len)
             embeddings = torch.empty(
-                (local_seq_len, self.hidden_size), device=device, dtype=_BF16_DTYPE
+                (local_seq_len, self.hidden_size),
+                device=device,
+                dtype=_packed_stream_dtype(),
             )
             if local_live_rows < local_seq_len:
                 embeddings[local_live_rows:].zero_()
@@ -2286,7 +2446,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             # contract. Preserve their historical zero-fill/add semantics for
             # sparse or overlapping row maps.
             embeddings = torch.zeros(
-                (local_seq_len, self.hidden_size), device=device, dtype=_BF16_DTYPE
+                (local_seq_len, self.hidden_size),
+                device=device,
+                dtype=_packed_stream_dtype(),
             )
 
         if local_embedding_layout is None:
@@ -2324,17 +2486,19 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             text_rows = text_source_stop - text_source_start
             if text_rows:
                 embeddings[:text_rows].copy_(
-                    text_embed[text_source_start:text_source_stop]
+                    text_embed[text_source_start:text_source_stop].to(
+                        dtype=embeddings.dtype
+                    )
                 )
         elif text_row_ids.numel():
             write_rows(
                 0,
                 text_row_ids,
-                text_embed.index_select(0, text_source_ids).to(_BF16_DTYPE),
+                text_embed.index_select(0, text_source_ids).to(dtype=embeddings.dtype),
             )
 
         # latent embedders stay fp32; only rows owned by this SP rank are
-        # projected, then cast during scattering into the bf16 sequence
+        # projected, then cast into the packed stream
         if img_row_ids.numel():
             x_rows = (
                 x.view(-1, x.shape[-1]).index_select(0, img_global_ids).to(_FP32_DTYPE)
@@ -2343,7 +2507,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             write_rows(
                 0,
                 img_row_ids,
-                video_embed.to(_BF16_DTYPE),
+                video_embed.to(dtype=embeddings.dtype),
             )
 
         if audio_row_ids.numel():
@@ -2356,7 +2520,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             write_rows(
                 0,
                 audio_row_ids,
-                audio_embed.to(_BF16_DTYPE),
+                audio_embed.to(dtype=embeddings.dtype),
             )
 
         t_emb = self._time_embedding(unique_timesteps)
@@ -2495,7 +2659,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             self.materialize_mps_non_layer_weights("rope")
             rope_freqs = self.rope(img_position_ids[:, row_start:row_stop]).to(device)
             rope_cache = (
-                _rope_cos_sin_cache(rope_freqs, dtype=_BF16_DTYPE),
+                _rope_cos_sin_cache(rope_freqs, dtype=volta_compute_dtype()),
                 torch.arange(
                     local_seq_len,
                     device=device,
@@ -2529,7 +2693,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         adaln_input = (
             t_emb
             if self.adaln_t_table is not None
-            else nn.functional.silu(t_emb).to(_BF16_DTYPE)
+            else nn.functional.silu(t_emb).to(volta_compute_dtype())
         )
         inverse_indices = inverse_indices.to(device)
         block_inverse = inverse_indices[row_start:row_stop]

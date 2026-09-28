@@ -541,7 +541,7 @@ class QSAIndexer(MultiPlatformOp):
             token_topk=self.token_topk,
         )
 
-    def forward_cuda(
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
@@ -549,6 +549,9 @@ class QSAIndexer(MultiPlatformOp):
         indexer_metadata,
         skip_prefill_selection: bool = False,
     ) -> torch.Tensor:
+        """Portable orchestration shared by different platforms.
+        Fast paths are gated per platforms inside kernel calls.
+        """
         forward_mode = forward_batch.forward_mode
         is_target_verify = getattr(forward_mode, "is_target_verify", lambda: False)()
         is_draft_extend = getattr(forward_mode, "is_draft_extend_v2", lambda: False)()
@@ -673,6 +676,38 @@ class QSAIndexer(MultiPlatformOp):
             row_ends,
             logical_positions,
             row_sequence_lengths,
+        )
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch,
+        indexer_metadata,
+        skip_prefill_selection: bool = False,
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            hidden_states,
+            positions,
+            forward_batch,
+            indexer_metadata,
+            skip_prefill_selection=skip_prefill_selection,
+        )
+
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch,
+        indexer_metadata,
+        skip_prefill_selection: bool = False,
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            hidden_states,
+            positions,
+            forward_batch,
+            indexer_metadata,
+            skip_prefill_selection=skip_prefill_selection,
         )
 
 

@@ -8,7 +8,9 @@
 
 **DeepSeek-V4.1-Flash** (official mixed MXFP8+MXFP4, DSpark, 8× V100-32GB, 256k, one stream) — short code ~9 tok/s, warm prefill ~560 tok/s.
 
-A Volta (sm70) port of [SGLang](https://github.com/sgl-project/sglang). Those two models are the supported ones. Others may load; they are untested here.
+**MiniMax-H3** (video and a matching audio track, 4× V100-32GB) — text, first and last frame, and reference. Video with H3 is supported as well.
+
+A Volta (sm70) port of [SGLang](https://github.com/sgl-project/sglang). Those three models are the supported ones. Others may load; they are untested here.
 
 </div>
 
@@ -22,17 +24,20 @@ Upstream SGLang does not support Volta. CUDA 13 dropped sm70, FlashAttention nee
 
 **DeepSeek-V4.1-Flash** ([checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)) is the second engine, and the one this tree serves on Volta: CSA2 sparse attention, host Engram, MXFP4 expert spill, and the checkpoint's own DSpark draft, on eight 32 GB V100s. One resident agent session continues from a recorded prefix stop. A second session still prefills from scratch. Short code is about **9 tok/s**; warm 8k prefill is about **560 tok/s**. Vision support for casual image inference (semi-performant). Full table: [DeepSeek-V4.1-Flash](#deepseek-v41-flash).
 
+**MiniMax-H3** ([checkpoint](https://huggingface.co/MiniMaxAI/MiniMax-H3)) is the video engine: a clip and a matching soundtrack in one request, on four 32 GB V100s. Text-to-video, a first frame, a last frame, or both, and reference image, video, or audio. One process loads one weight partition; switching between text/keyframes and reference is a restart. Setup and use guideline is in [docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md). Full section: [MiniMax-H3](#minimax-h3).
+
 ## Hardware and software requirements
 
-| | Qwen3.8-Flash-Next | DeepSeek-V4.1-Flash |
-|---|---|---|
-| GPUs | 4× V100 32 GB (SXM2 recommended; NVLink helps, a partial mesh is fine). Four cards are the Qwen shape | **8×** V100-SXM2-32GB, TP=8 / EP=8. Four cards are not enough |
-| Host RAM | **~134 GB measured in use** at 262k with `--hicache-size 8`. 160 GB is a comfortable floor. The host cache tier scales with `--hicache-size` | Host Engram (~189 GiB) plus pinned expert spill, on a large RAM node next to the GPUs, with **1G hugepages** on that NUMA node |
-| Disk | 126 GB NVFP4 weights, plus the disk cache tier | ~476 GB (48 shards) |
-| Context | 262,144 | 262,144 advertised. 8k prefill is what has been smoked; 512k has not left ~300 MiB for the Engram MXFP8 unpack |
-| CUDA | 12.8 or 12.9. CUDA 13.x removed Volta | same |
-| Host compiler | GCC **≤ 14** with a working `cc1plus`. CUDA 12.9 rejects GCC 15, and many distros now default to it | same |
-| Python | 3.12 | 3.12 |
+| | Qwen3.8-Flash-Next | DeepSeek-V4.1-Flash | MiniMax-H3 |
+|---|---|---|---|
+| GPUs | 4× V100 32 GB (SXM2 recommended; NVLink helps, a partial mesh is fine). Four cards are the Qwen shape | **8×** V100-SXM2-32GB, TP=8 / EP=8. Four cards are not enough | 4× V100 32 GB. The diffusion transformer stays on the GPUs |
+| Host RAM | **~134 GB measured in use** at 262k with `--hicache-size 8`. 160 GB is a comfortable floor. The host cache tier scales with `--hicache-size` | Host Engram (~189 GiB) plus pinned expert spill, on a large RAM node next to the GPUs, with **1G hugepages** on that NUMA node | Text encoder and both VAEs on the host. No extra host-cache tier |
+| Disk | 126 GB NVFP4 weights, plus the disk cache tier | ~476 GB (48 shards) | The MiniMax-H3 checkpoint. Reference mode needs the `Ref2VA/` partition as well as `FL2VA/` |
+| Context | 262,144 | 262,144 advertised. 8k prefill is what has been smoked; 512k has not left ~300 MiB for the Engram MXFP8 unpack | 4.0–15.0 seconds at 24 fps |
+| CUDA | 12.8 or 12.9. CUDA 13.x removed Volta | same | same |
+| Host compiler | GCC **≤ 14** with a working `cc1plus`. CUDA 12.9 rejects GCC 15, and many distros now default to it | same | same |
+| Python | 3.12 | 3.12 | 3.12 |
+| Media tools | | | `ffmpeg` and `ffprobe` (one `ffmpeg` package). The server will not start without them |
 
 The 32 GB-per-GPU figure is not negotiable for Qwen: the NVFP4 weights alone are ~22 GB per rank at TP=4. The host-RAM and disk figures are measured on a running system. Four PCIe-only V100s (P2P, no NVLink): set `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` and `NCCL_P2P_LEVEL=PXB`. Those stay off by default; leave them off on an 8× hybrid NVLink mesh.
 
@@ -50,9 +55,11 @@ bash scripts/install_v100.sh
 bash scripts/smoke_v100.sh
 ```
 
-`install_v100.sh` plus `smoke_v100.sh` is the entire install. **[docs/v100/INSTALL.md](docs/v100/INSTALL.md)** documents each step and what to do when one fails. Run the smoke check. No prebuilt kernels are distributed (the `.so` files are build outputs), and the stock Marlin MoE kernel is an empty stub below sm80, so a server missing the V100 kernels starts, answers, and returns zero-valued expert output.
+`install_v100.sh` plus `smoke_v100.sh` is the entire install for the language servers. **[docs/v100/INSTALL.md](docs/v100/INSTALL.md)** documents each step and what to do when one fails. Run the smoke check. No prebuilt kernels are distributed (the `.so` files are build outputs), and the stock Marlin MoE kernel is an empty stub below sm80, so a server missing the V100 kernels starts, answers, and returns zero-valued expert output. MiniMax-H3 also needs the system `ffmpeg` package (`ffmpeg` and `ffprobe`); `install_v100.sh` does not install it.
 
-One engine at a time. Qwen and DeepSeek bind the same address, `0.0.0.0:11435` (`SGLANG_V100_HOST` / `SGLANG_V100_PORT`), not port 30000.
+MiniMax-H3 video is a separate server on four V100s, port 30010. It does not share the language-server port. Setup and use guideline is in **[docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md)**. Section: [MiniMax-H3](#minimax-h3).
+
+One language engine at a time. Qwen and DeepSeek bind the same address, `0.0.0.0:11435` (`SGLANG_V100_HOST` / `SGLANG_V100_PORT`), not port 30000.
 
 ```bash
 # Qwen, long context, no speculation
@@ -63,6 +70,11 @@ bash scripts/serve_qwen38_flash_next_nvfp4_v100.sh mtp
 
 # DeepSeek-V4.1-Flash, 8× V100
 bash scripts/serve_dsv41_v100.sh
+
+# MiniMax-H3 video, four V100s, port 30010
+export H3_MODEL=~/models/MiniMax-H3
+bash scripts/serve_minimax_h3_v100.sh          # text and keyframes
+bash scripts/serve_minimax_h3_v100.sh ref2va   # reference image, video, audio
 ```
 
 ## Qwen3.8-Flash-Next
@@ -310,9 +322,64 @@ python -m sglang.launch_server \
 
 Leave `--speculative-dspark-block-size` at the checkpoint default. Checkpoint weights stay mixed MXFP4 experts + packed MXFP8 dense.
 
+## MiniMax-H3
+
+Video and a matching audio track, on four 32 GB V100s. fp16 compute, TileLang attention, and an on-load 4-bit packing of the transformer. One process loads one partition. Setup and use guideline is in **[docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md)**.
+
+### Get the model
+
+The official checkpoint. `FL2VA/` serves text-to-video and a first frame, a last frame, or both. `Ref2VA/` serves a reference image, a reference video, reference audio, and video-to-video. The model stays under its own license.
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf download MiniMaxAI/MiniMax-H3 \
+  --local-dir ~/models/MiniMax-H3
+
+export H3_MODEL=~/models/MiniMax-H3
+```
+
+| | |
+|---|---|
+| checkpoint | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3) |
+| quantisation | On-load group-128 4-bit packing of the transformer (`v100_w4a16_awq`). Text encoder and both VAEs stay fp16 |
+
+### Talking to it
+
+The server listens on port 30010, not the language-server port. `POST /v1/videos` returns an id immediately. Poll `GET /v1/videos/{id}` until `completed` or `failed`, then download `GET /v1/videos/{id}/content`. The file is an MP4: H.264 video, AAC audio.
+
+Text and keyframes need `bash scripts/serve_minimax_h3_v100.sh`. Reference tasks need `bash scripts/serve_minimax_h3_v100.sh ref2va`. Restart to switch. A `fl2va` process rejects `ref2va`, and a `ref2va` process rejects `t2va` and `fl2va`.
+
+`i2v` and `l2v` are not task names. A first frame is `fl2va` with `frame_index` 0. A last frame is `frame_index` -1.
+
+### Measured performance
+
+2026-09-28, 4× V100-32GB, the W4 recipe, `flow_shift` 12. A step is one denoising evaluation. The same table is in the guide.
+
+| Clip | Steps | Step time |
+|---|---:|---:|
+| 960×544, about 5 s, text or keyframe | 50 | 10–12 s |
+| 1344×768, 5 s, text-to-video | 50 | about 30 s (1471 s total) |
+| 960×544, 4.5 s, video reference | 12 | about 53 s |
+| 1344×768, 4.5 s, image reference | 12 | about 42 s |
+| 960×544, 15 s, image reference | 12 | about 84 s |
+
+A video reference stays on the 768 short-edge canvas even when the generated clip is smaller, so those steps cost more than a text-only clip of the same output size. The 15-second image reference peaked near 29.5 GB on a 32 GB card.
+
+### Reference recipe
+
+The wrapper is the supported entry. `fl2va` is the default.
+
+```bash
+export H3_MODEL=~/models/MiniMax-H3
+bash scripts/serve_minimax_h3_v100.sh
+bash scripts/serve_minimax_h3_v100.sh ref2va
+```
+
+`H3_GPUS` selects the four cards (default `0,1,2,3`). `H3_PORT` defaults to 30010. Setup and use guideline is in [docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md).
+
 ## What the port adds
 
-None of this exists upstream. The Volta port itself — sm70 kernels, Qwen3.8 model support, and that serving recipe — is [haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100). This repository re-lands that work onto a much newer SGLang, fixes what the move broke, and adds the DeepSeek-V4.1-Flash path. Credit and lineage are at the bottom.
+None of this exists upstream. The Volta port itself — sm70 kernels, Qwen3.8 model support, and that serving recipe — is [haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100). This repository re-lands that work onto a much newer SGLang, fixes what the move broke, and adds the DeepSeek-V4.1-Flash path and MiniMax-H3 video. Credit and lineage are at the bottom.
 
 - **NVFP4 W4A16 on sm70** — a JIT CUDA path for FP4 weights on hardware with no FP4 support, plus the Marlin V100 GPTQ/AWQ repack kernels.
 - **TileLang attention for Volta** (`tilelang_fa_v100`) — paged prefill, decode and verify kernels, registered as a first-class attention backend.
@@ -323,11 +390,12 @@ None of this exists upstream. The Volta port itself — sm70 kernels, Qwen3.8 mo
 - **PLE host offload** — the 51 GB n-gram table lives in host RAM, with the per-request n-gram and short-conv state riding the mamba slot lifecycle.
 - **Single-stage custom all-reduce**, because two-stage is pathological on a partial NVLink mesh.
 - **fp16 forcing** throughout, since Volta has no bf16 (`SGLANG_SM70_FORCE_FP16`).
+- **MiniMax-H3 video** on four V100s: W4A16, TileLang attention, text-to-video, first/last frame, and reference mode. Guide: [docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md).
 
 ## Limitations and known gaps
 
 - **Qwen3.8-Flash-Next is the soaked model.** DeepSeek-V4.1-Flash on this snapshot has run a multi-hour Claude Code session on one conversation (prefix reuse at recorded stops, no crash in that session). It is still one conversation: a second session prefills from zero, and the image does not survive a restart. A long uncached suffix is about 60 tok/s. Leftover HBM after load is a few GiB, and open-ended greedy (temperature 0) can loop. Other architectures may load; several upstream model paths still assume sm80+ kernels.
-- **`multimodal_gen` (diffusion / video generation) is not ported.** It carries upstream's code, not this fork's Volta adaptations. The Qwen3.8 vision tower is a different subsystem, and it works. DeepSeek-V4.1 image requests stream the rank-0 tower through GPU GEMMs.
+- **MiniMax-H3 is the video path.** Four V100s, fp16. Setup and use guideline is in [docs/v100/H3_VIDEO.md](docs/v100/H3_VIDEO.md). Reference mode needs the `Ref2VA` weights and `--model-variant ref2va`. The Qwen3.8 vision tower is a different subsystem, and it works. DeepSeek-V4.1 image requests stream the rank-0 tower through GPU GEMMs.
 - **Stability was hammered, not soaked.** A ~1-hour sustained load — agentic prompts at np 1/2/4 plus a beyond-spec 32k-token / np 8 phase — ran with no crash and no incorrect output at the current `--mem-fraction-static 0.86`. It did surface one prefill OOM at the previous 0.88 default under the beyond-spec load; the 0.86 retune fixed it (rationale in the serve-script comment). A multi-day soak has not been run.
 - **Greedy output is not bit-reproducible across cache states.** A property of the FP16 mamba-hybrid pipeline with a radix cache: the cache replays an approximate GDN (linear-attention) state for a cached prefix, so a prompt's exact tokens can differ a little between a cold and a warm prefix, and prompts sitting on a token decision boundary can vary across runs. Every output is a valid completion.
 - **A cold FlashInfer JIT cache costs several minutes** on first launch, and four TP ranks will compile in parallel. Subsequent launches are fast.
@@ -335,7 +403,7 @@ None of this exists upstream. The Volta port itself — sm70 kernels, Qwen3.8 mo
 
 ## Relationship to upstream
 
-This is a downstream of [haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100), which is itself a fork of [sgl-project/sglang](https://github.com/sgl-project/sglang). The V100 port was cut from upstream around 2026-06-01 and had not been re-synced since; this repository re-lands it onto upstream `main` as of 2026-09-02 (`99b910955`), about 4,250 commits later. Upstream's engine — including the unified radix cache, the hierarchical KV cache and the speculative decoding stack — is used as-is wherever possible; this fork adds the sm70 layer, Qwen3.8-Flash-Next, and an initial DeepSeek-V4.1-Flash serve path on top.
+This is a downstream of [haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100), which is itself a fork of [sgl-project/sglang](https://github.com/sgl-project/sglang). The V100 port was cut from upstream around 2026-06-01 and had not been re-synced since; this repository re-lands it onto upstream `main` as of 2026-09-02 (`99b910955`), about 4,250 commits later. Upstream's engine — including the unified radix cache, the hierarchical KV cache and the speculative decoding stack — is used as-is wherever possible; this fork adds the sm70 layer, Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash, and MiniMax-H3 video on top.
 
 This is not a pure 3-way merge between the two upstream repos. Beyond re-landing the port, the tree carries hand-crafted optimizations and bug fixes, and it is ruggedized, tested, and plug-and-play — it runs as shipped. It is also ongoing: we intend to keep pulling in upstream improvements as well as continuing our own work on top.
 
@@ -347,7 +415,7 @@ Bug reports about the sm70 path belong here. Bug reports about SGLang itself bel
 
 **The Volta port is [haohervchb](https://github.com/haohervchb/sglang-V100)'s work.** Every sm70 kernel in here — the TileLang attention backend, QSA, the GDN linear-attention kernels, NVFP4 on hardware with no FP4 support, the TurboMind sm70 backend, the PLE host offload, the Qwen4-Exp model support — was written there, along with the serving recipe and the tuning that makes it fit in 32 GB. If this is useful to you, that is where the credit belongs. The patched sm70 FlashInfer the build uses is also theirs ([haohervchb/flashinfer](https://github.com/haohervchb/flashinfer)).
 
-This repository's contribution is narrower: re-landing that port onto an SGLang roughly 4,250 commits newer, fixing what the move broke, and adding the DeepSeek-V4.1-Flash path.
+This repository's contribution is narrower: re-landing that port onto an SGLang roughly 4,250 commits newer, fixing what the move broke, and adding the DeepSeek-V4.1-Flash path and MiniMax-H3 video.
 
 Both are derivative works of [SGLang](https://github.com/sgl-project/sglang) (Apache 2.0, Copyright 2023-2024 SGLang Team), which does the hard part.
 

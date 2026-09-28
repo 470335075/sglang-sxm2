@@ -43,6 +43,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.utils.common import ceil_align
 
 if TYPE_CHECKING:
@@ -225,6 +226,19 @@ class StickyLastSequenceCache(BasePrefixCache):
             cache_protected_len=0,
         )
 
+    def claim_kv_row(self, req: Req) -> bool:
+        """Keep this request's kv row for the next turn.
+
+        ``release_kv_cache`` frees the row unless this returns True after the
+        record has been detached onto the pin.
+        """
+        if is_health_check_generate_req(req):
+            return False
+        if isinstance(req.finished_reason, FINISH_ABORT):
+            return self._pin_aborted_prefix(req)
+        self._pin_finished(req)
+        return True
+
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
         if is_health_check_generate_req(req):
             self.inner.cache_finished_req(req, is_insert=is_insert, **kwargs)
@@ -242,6 +256,9 @@ class StickyLastSequenceCache(BasePrefixCache):
             self.inner.cache_finished_req(req, is_insert=is_insert, **kwargs)
             return
 
+        self._pin_finished(req)
+
+    def _pin_finished(self, req: Req) -> None:
         ids = _finished_token_ids(req)
         finished_len = (
             req.finished_len if req.finished_len is not None else len(req.output_ids)
@@ -320,7 +337,7 @@ class StickyLastSequenceCache(BasePrefixCache):
         if not self._pin_idle(active_pool_idxs):
             return 0
         allocated = ceil_align(self._slot.kv.kv_allocated_len, self.page_size)
-        return allocated - self._slot.kv.swa_evicted_seqlen
+        return allocated - self._slot.kv.get_evicted_seqlen(ComponentType.SWA)
 
     def session_held_req_count(self, active_pool_idxs: Optional[set] = None) -> int:
         # Counted as allocatable in Scheduler.get_num_allocatable_reqs.
@@ -541,7 +558,6 @@ class StickyLastSequenceCache(BasePrefixCache):
             req_pool_idx=idx,
             kv_committed_len=prefix_len,
             kv_allocated_len=prefix_len,
-            swa_evicted_seqlen=0,
             cache_protected_len=0,
         )
         return True
@@ -647,16 +663,16 @@ class StickyLastSequenceCache(BasePrefixCache):
         self._free_kv_aligned(kv, prefix_len, kv.kv_allocated_len)
         kv.kv_allocated_len = prefix_len
         kv.kv_committed_len = min(kv.kv_committed_len, prefix_len)
-        kv.swa_evicted_seqlen = min(kv.swa_evicted_seqlen, prefix_len)
+        kv.clamp_evicted_seqlens(prefix_len)
 
     def _trim_overshoot(self, req: Req, finished_len: int) -> None:
         target = len(req.origin_input_ids) + finished_len
-        if self.page_size > 1 and req.kv.swa_evicted_seqlen > target:
+        if self.page_size > 1 and req.kv.max_evicted_seqlen > target:
             target = (target // self.page_size) * self.page_size
         self._free_kv_aligned(req.kv, target, req.kv.kv_allocated_len)
         req.kv.kv_allocated_len = min(req.kv.kv_allocated_len, target)
         req.kv.kv_committed_len = min(req.kv.kv_committed_len, target)
-        req.kv.swa_evicted_seqlen = min(req.kv.swa_evicted_seqlen, target)
+        req.kv.clamp_evicted_seqlens(target)
         req.output_ids = req.output_ids[:finished_len]
 
     def _free_kv_aligned(self, kv: ReqKvInfo, target: int, end: int) -> None:

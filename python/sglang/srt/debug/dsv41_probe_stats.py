@@ -28,9 +28,9 @@ def enabled() -> bool:
 
 def _rank() -> int:
     try:
-        from sglang.srt.distributed import get_tp_group
+        from sglang.srt.runtime_context import get_parallel
 
-        return int(get_tp_group().rank_in_group)
+        return int(get_parallel().tp_group.rank_in_group)
     except Exception:
         return int(os.environ.get("RANK", "0"))
 

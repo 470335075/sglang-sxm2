@@ -4,6 +4,7 @@ import concurrent.futures
 import functools
 import logging
 import time
+from array import array
 from contextlib import contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
@@ -35,10 +36,6 @@ from sglang.kernels.ops.quantization.fp8_kernel import (
 )
 from sglang.srt.compilation.compilation_config import register_split_op
 from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
-from sglang.srt.distributed import (
-    get_pp_group,
-    get_tp_group,
-)
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
@@ -759,7 +756,7 @@ def deepseek_v4_low_ratio_sources(layer, x, q_lora, positions) -> None:
     # The compressor and prefill indexer sync with the host: run them outside
     # the prefill CUDA graph on the live batch, like the attention.
     forward_batch = get_tc_piecewise_forward_context().forward_batch
-    real_num_tokens = forward_batch.num_token_non_padded_cpu
+    real_num_tokens = forward_batch.global_num_token_non_padded_cpu
     if real_num_tokens == 0:
         return
     get_attn_backend().forward_low_ratio_sources(
@@ -2897,7 +2894,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         # all-reduce input. Gated by is_allocation_symmetric() (mirrors the
         # TileLang path in _mhc_pre_impl / mhc_fused_post_pre).
         with use_symmetric_memory(
-            get_tp_group(), disabled=not is_allocation_symmetric()
+            get_parallel().tp_group, disabled=not is_allocation_symmetric()
         ):
             y = hc_combine(x_flat, pre.squeeze(1), self.hc_mult, dtype)
         return y, post.squeeze(1), comb.squeeze(1), False
@@ -3300,7 +3297,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
         elif _use_tp_moe_gather:
             hidden_states, local_hidden_states = (
-                get_global_dp_buffer(get_tp_group()),
+                get_global_dp_buffer(get_parallel().tp_group),
                 hidden_states,
             )
             if _do_shared_local and local_hidden_states.shape[0] > 0:
@@ -3322,7 +3319,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         # Skip the MoE-internal post-experts all_reduce when we will do the
         # reduce via reduce_scatterv/reduce_scatter at the combine below
         # (else double-reduce).
-        with get_forward().scoped(mlp_reduce_scatter=mlp_reduce_scatter):
+        gathered_rows = (
+            _every_row_routed(forward_batch, hidden_states.shape[0])
+            if _use_cp and get_moe_a2a_backend().is_none()
+            else nullcontext()
+        )
+        with (
+            get_forward().scoped(mlp_reduce_scatter=mlp_reduce_scatter),
+            gathered_rows,
+        ):
             hidden_states = self.mlp(
                 hidden_states,
                 forward_batch,
@@ -3334,7 +3339,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             hidden_states = dsa_cp_reduce_scatter_hidden_states(hidden_states)
         elif _use_tp_moe_gather:
             hidden_states, global_hidden_states = (
-                get_local_dp_buffer(get_tp_group()),
+                get_local_dp_buffer(get_parallel().tp_group),
                 hidden_states,
             )
             if should_use_dp_reduce_scatterv() or _use_reduce_scatterv:
@@ -3342,7 +3347,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # each rank its own token slice, in one op. Correct because the
                 # MoE-internal all_reduce was skipped (mlp_reduce_scatter above).
                 # This is the symmetric inverse of the all_gatherv gather.
-                get_tp_group().reduce_scatterv(
+                get_parallel().tp_group.reduce_scatterv(
                     global_hidden_states,
                     output=hidden_states,
                     sizes=get_dp_global_num_tokens(),
@@ -4108,7 +4113,7 @@ class DeepseekV4Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.pp_group = get_pp_group()
+        self.pp_group = get_parallel().pp_group
         self.hidden_size = config.hidden_size
         if self.pp_group.is_first_rank:
             embedding_quant_config = (
@@ -4416,7 +4421,7 @@ class DeepseekV4Model(nn.Module):
         # once across DP ranks, then populate each child's global_num_tokens +
         # global_dp_buffer_len so the gatherv/reduce_scatterv buffers size correctly.
         if get_moe_a2a_backend().is_none() and get_parallel().attn_dp_size > 1:
-            tp_group = get_tp_group()
+            tp_group = get_parallel().tp_group
             world = tp_group.world_size
             children = forward_batch.tbo_children
             local_lens = torch.tensor(
@@ -4810,12 +4815,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         self.model = DeepseekV4Model(
             config, quant_config, prefix=add_prefix("model", prefix)
         )
-        self.pp_group = get_pp_group()
+        self.pp_group = get_parallel().pp_group
         self._cpu_vision_on = _dsv41_cpu_tower_on(config)
         self._cpu_vision_owner = (
             self._cpu_vision_on
             and self.pp_group.is_first_rank
-            and get_tp_group().rank_in_group == 0
+            and get_parallel().tp_group.rank_in_group == 0
         )
         if self._cpu_vision_owner:
             self._install_cpu_vision(config)
@@ -5220,7 +5225,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         compile_secs = time.perf_counter() - tic
         # Runs before init_memory_pool(); don't let transients skew pool sizing.
         torch.cuda.empty_cache()
-        get_tp_group().barrier()
+        get_parallel().tp_group.barrier()
         logger.info(
             "DeepSeek V4 MHC prewarm at load: compile %.1fs, rank sync +%.1fs",
             compile_secs,
@@ -5742,7 +5747,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _broadcast_vision_span(self, span: Optional[torch.Tensor]) -> torch.Tensor:
-        group = get_tp_group()
+        group = get_parallel().tp_group
         device = self._vision_device()
         if group.world_size == 1:
             return span
@@ -5821,7 +5826,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             )
         else:
             spans = [None] * len(items)
-        if get_tp_group().world_size > 1:
+        if get_parallel().tp_group.world_size > 1:
             spans = [self._broadcast_vision_span(span) for span in spans]
         return spans
 

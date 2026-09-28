@@ -784,7 +784,7 @@ def _prefill_low_ratio_sources(backend, layer, x, q_lora, positions, forward_bat
 def _select_topk(scores: torch.Tensor, lens32: torch.Tensor, k: int) -> torch.Tensor:
     """Row 0 top-k indices over ``scores[:, :lens]``; -1 where absent or -inf."""
     if k in _FAST_TOPK_K:
-        from sglang.kernels.ops.elementwise.fast_topk import fast_topk
+        from sglang.kernels.ops.attention.fast_topk import fast_topk
 
         idx = fast_topk(scores, lens32, k)
     else:

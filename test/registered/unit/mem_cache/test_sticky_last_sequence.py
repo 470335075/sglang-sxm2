@@ -118,7 +118,6 @@ class _FakeReq:
             req_pool_idx=req_pool_idx,
             kv_committed_len=committed,
             kv_allocated_len=allocated,
-            swa_evicted_seqlen=0,
             cache_protected_len=0,
         )
         self.origin_input_ids = list(origin)
