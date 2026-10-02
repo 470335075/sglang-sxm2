@@ -369,6 +369,7 @@ class OpenAIServingChat(OpenAIServingBase):
         except Exception:
             self._tokenizer_auto_adds_specials = True
         self._prompt_text_round_trip_is_lossy = self._probe_prompt_text_round_trip()
+        self._segment_encoder = self.tokenizer_manager.segment_encoder
         self._chat_template_cache: OrderedDict[bytes, tuple[tuple[int, ...], str]] = (
             OrderedDict()
         )
@@ -1588,7 +1589,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     reasoning_effort=v4_reasoning_effort,
                     reasoning_effort_profile=reasoning_effort_profile,
                 )
-                prompt_ids = self.tokenizer_manager.tokenizer.encode(real_input)
+                prompt_ids = self._encode_prompt_text(real_input, {})
             elif is_dsv41:
                 if request.task is not None:
                     encoding_dsv41.attach_task_to_last_user_message(
@@ -1615,12 +1616,12 @@ class OpenAIServingChat(OpenAIServingBase):
                             self.tokenizer_manager.image_token_id
                         ),
                     )
-                prompt_ids = self.tokenizer_manager.tokenizer.encode(real_input)
+                prompt_ids = self._encode_prompt_text(real_input, {})
             else:
                 real_input = encoding_dsv32.encode_messages(
                     messages, thinking_mode=thinking_mode
                 )
-                prompt_ids = self.tokenizer_manager.tokenizer.encode(real_input)
+                prompt_ids = self._encode_prompt_text(real_input, {})
 
             # Append assistant prefix if continue_final_message is enabled
             if assistant_prefix:
@@ -1743,6 +1744,15 @@ class OpenAIServingChat(OpenAIServingBase):
             stop=stop,
         )
 
+    def _encode_prompt_text(
+        self, text: str, encode_kwargs: Dict[str, Any]
+    ) -> List[int]:
+        # The segment encoder only exists for tokenizers that add no specials,
+        # so it matches the plain encode for either kwargs choice.
+        if self._segment_encoder is not None:
+            return self._segment_encoder.encode(text)
+        return self.tokenizer_manager.tokenizer.encode(text, **encode_kwargs)
+
     def _render_and_encode_chat_template(
         self,
         messages: List[Dict[str, Any]],
@@ -1798,9 +1808,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 return_dict=False,
                 **template_kwargs,
             )
-            prompt_ids = self.tokenizer_manager.tokenizer.encode(
-                rendered_prompt, **encode_kwargs
-            )
+            prompt_ids = self._encode_prompt_text(rendered_prompt, encode_kwargs)
         decoded_prompt = (
             self.tokenizer_manager.tokenizer.decode(prompt_ids)
             if cache_key is not None

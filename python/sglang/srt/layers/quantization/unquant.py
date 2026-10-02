@@ -507,6 +507,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
             bias = bias.to(dtype=x.dtype)
         if supported(x, weight, bias):
             return linear(x, weight)
+        from sglang.kernels.ops.gemm import sm70_rows_gemv
+
+        if bias is None and sm70_rows_gemv.supported(x, weight):
+            return sm70_rows_gemv.linear(x, weight)
         return F.linear(x, weight, bias)
 
     def apply_fused_silu_and_mul(self, layer, x):

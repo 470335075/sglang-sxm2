@@ -2758,8 +2758,27 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                 assert torch.all(w13_input_scale == w13_input_scale[0])
                 w13_input_scale = w13_input_scale[0]
         else:
-            w13_input_scale = layer.w13_input_scale.max(dim=-1).values.to(torch.float32)
+            # EP keeps a local weight-scale row and a global activation-scale
+            # vector. Collapse any extra trailing dim, then take this rank's
+            # experts so the two multiply (288 vs 36 on EP8).
+            w13_input_scale = layer.w13_input_scale
+            if w13_input_scale.dim() > 1:
+                w13_input_scale = w13_input_scale.max(dim=-1).values
+            w13_input_scale = _input_scale_to_local_experts(
+                w13_input_scale,
+                layer.num_local_experts,
+                layer.num_experts,
+                layer.moe_ep_rank,
+            )
             w2_input_scale = layer.w2_input_scale
+            if w2_input_scale.dim() > 1:
+                w2_input_scale = w2_input_scale.max(dim=-1).values
+            w2_input_scale = _input_scale_to_local_experts(
+                w2_input_scale,
+                layer.num_local_experts,
+                layer.num_experts,
+                layer.moe_ep_rank,
+            )
 
         use_cutedsl_w4a16 = (
             self._is_cutedsl_v2_standard
@@ -3011,6 +3030,33 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             # create_weights; they are sizeable for 512 experts and unused.
             layer.w13_blockscale_swizzled = layer.w13_weight_scale
             layer.w2_blockscale_swizzled = layer.w2_weight_scale
+            from sglang.kernels.ops.moe.sm70_glm_nvfp4_moe_decode import (
+                convert_marlin_experts_to_hmma,
+                ensure_glm_marlin_scratch,
+                glm_marlin_experts_supported,
+                sm70_glm_nvfp4_moe_decode_available,
+            )
+
+            if sm70_glm_nvfp4_moe_decode_available() and glm_marlin_experts_supported(
+                layer.w13_weight, layer.w2_weight
+            ):
+                # Same bytes as the Marlin pack. Prefill unpacks into one
+                # shared scratch allocated here, before the KV pool.
+                ensure_glm_marlin_scratch(
+                    layer.w13_weight.device,
+                    layer.w13_weight.shape,
+                    layer.w2_weight.shape,
+                )
+                copy_or_rebind_param(
+                    layer,
+                    "w13_weight",
+                    convert_marlin_experts_to_hmma(layer.w13_weight),
+                )
+                copy_or_rebind_param(
+                    layer,
+                    "w2_weight",
+                    convert_marlin_experts_to_hmma(layer.w2_weight),
+                )
             return
 
         if (

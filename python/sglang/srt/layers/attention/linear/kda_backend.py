@@ -199,6 +199,22 @@ class KDAKernelDispatcher:
                 "SM100, ptx_kda SM103)."
             )
 
+        if (
+            is_cuda()
+            and torch.cuda.is_available()
+            and torch.cuda.get_device_capability() == (7, 0)
+        ):
+            from sglang.srt.layers.attention.linear.kernels.kda_sm70 import (
+                Sm70KDAKernel,
+            )
+
+            # Triton KDA is bf16. Volta runs the fp16 recurrence for decode,
+            # extend, and chain verify, including the safe gate.
+            sm70_kernel = Sm70KDAKernel()
+            self.decode_kernel = sm70_kernel
+            self.extend_kernel = sm70_kernel
+            self.verify_kernel = sm70_kernel
+
         self.supports_packed_decode = getattr(
             self.decode_kernel, "supports_packed_decode", False
         )
@@ -259,8 +275,9 @@ class KDAKernelDispatcher:
         lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
-        if lower_bound is not None and not isinstance(
-            self.decode_kernel, TritonKDAKernel
+        if lower_bound is not None and not (
+            isinstance(self.decode_kernel, TritonKDAKernel)
+            or getattr(self.decode_kernel, "supports_safe_gate", False)
         ):
             raise NotImplementedError(
                 f"lower_bound (safe gate) is only supported by TritonKDAKernel; "
@@ -304,8 +321,9 @@ class KDAKernelDispatcher:
         """MTP / speculative-decode verify, routed to ``self.verify_kernel``
         (FlashInfer decode -> recurrent_kda; Triton / CuTe DSL decode -> the Triton
         fused KDA verify)."""
-        if lower_bound is not None and not isinstance(
-            self.verify_kernel, TritonKDAKernel
+        if lower_bound is not None and not (
+            isinstance(self.verify_kernel, TritonKDAKernel)
+            or getattr(self.verify_kernel, "supports_safe_gate", False)
         ):
             raise NotImplementedError(
                 "lower_bound (safe gate) target verify is only supported by "

@@ -136,6 +136,7 @@ class _MockTokenizerManager:
             incremental_streaming_output=False,
         )
         self.model_path = self.server_args.model_path
+        self.segment_encoder = None
         # The manager tracks the served name itself; a weight update rewrites it.
         self.served_model_name = "test-model"
         # Stands in for the context's resolved leaves: an override replaces the

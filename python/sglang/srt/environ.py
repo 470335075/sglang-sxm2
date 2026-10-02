@@ -1040,6 +1040,9 @@ class Envs:
     SGLANG_MOE_NVFP4_DISPATCH = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE = EnvBool(False)
+    # NVFP4 checkpoints with a BF16 NextN layer: quantize the draft's routed experts
+    # to NVFP4 on load. Draft-only, so verify still decides every emitted token.
+    SGLANG_NVFP4_CKPT_NVFP4_NEXTN_MOE = EnvBool(False)
     # GLM NextN (MTP): cast the draft layer's bf16 fused MoE to per-channel FP8
     # on load. Unrelated to the NVFP4 block-FP8 NextN path above.
     SGLANG_GLM_NEXTN_MOE_PTPC = EnvBool(False)
@@ -1412,6 +1415,12 @@ class Envs:
     SGLANG_SM70_MTP_GDN = EnvBool(True)
     SGLANG_SM70_QSA_COMBINE = EnvBool(True)
     SGLANG_SM70_QSA_DRAFT_EXTEND_GRAPH = EnvBool(True)
+    # GLM-5.3-Flash NVFP4 batch-1..4 decode on Volta HMMA instead of Marlin:
+    # dense/shared-expert GEMV and routed experts. fp32 accumulation, so
+    # outputs differ from Marlin in the last fp16 bit.
+    SGLANG_SM70_GLM_NVFP4_GEMV = EnvBool(False)
+    SGLANG_SM70_GLM_NVFP4_MOE_DECODE = EnvBool(False)
+    SGLANG_SM70_GLM_NVFP4_BUILD_DIR = EnvStr("~/.cache/sglang/glm_nvfp4_gemv")
 
     # ===================================================================
     # RoPE cache
@@ -1527,6 +1536,8 @@ class Envs:
     # Think tokens budget: negative means unlimited, >= 0 caps thinking tokens
     SGLANG_MAX_THINK_TOKENS = EnvInt(-1)
     SGLANG_PATCH_TOKENIZER = EnvBool(True)
+    # Prompts encode each piece between added tokens once and reuse it.
+    SGLANG_DISABLE_PROMPT_SEGMENT_CACHE = EnvBool(False)
     SGLANG_REQUEST_STATE_WAIT_TIMEOUT = EnvInt(4)
     SGLANG_DEFAULT_THINKING = EnvBool(False)
 
@@ -1674,6 +1685,9 @@ class Envs:
     # bound (~67 ms/tok) while spill_copy is rank-divergent; leave off.
     SGLANG_DSV41_HIER_AR = EnvBool(False)
     SGLANG_DSV41_HIER_AR_CA = EnvBool(False)
+    # Quad and pair steps of the custom-AR chain fused into one push kernel
+    # (sm70_hier_push_ar), bitwise equal to the chain. Needs HIER_AR_CA.
+    SGLANG_DSV41_HIER_AR_PUSH = EnvBool(False)
     # Bind expert-spill pins to the preferred NUMA node with THP. Does not
     # consume the Engram hugetlb pool.
     SGLANG_ENABLE_DSV41_EXPERT_SPILL_NUMA = EnvBool(True)

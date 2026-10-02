@@ -184,6 +184,12 @@ def silu_and_mul_clamp(
         from sgl_kernel import silu_and_mul_clamp
 
         silu_and_mul_clamp(input, output, float(swiglu_limit))
+    elif input.dtype == torch.float16:
+        # The JIT kernel rounds its inputs to bf16 (the DeepSeek-V4 clamp
+        # contract), which drops three mantissa bits of an fp16 gate_up.
+        from sglang.kernels.ops.moe.sm70_moe_glue import swiglu_clamp
+
+        swiglu_clamp(output, input, float(swiglu_limit))
     else:
         module = _jit_silu_and_mul_clamp_module(input.dtype)
         module.run(input, output, float(swiglu_limit))

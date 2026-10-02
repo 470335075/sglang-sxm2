@@ -111,6 +111,7 @@ from sglang.srt.managers.schedule_batch import (
     get_request_return_hidden_states_mode,
 )
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
+from sglang.srt.managers.segment_encoder import SegmentCachedEncoder
 from sglang.srt.managers.tokenizer_control_mixin import TokenizerControlMixin
 from sglang.srt.managers.tokenizer_manager_score_mixin import TokenizerManagerScoreMixin
 from sglang.srt.managers.utils import (
@@ -507,6 +508,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         # Initialize tokenizer and multimodalprocessor
         self.init_tokenizer_and_processor()
+        self.maybe_init_segment_encoder()
 
         # Init inter-process communication
         self.init_ipc_channels(port_args)
@@ -609,6 +611,14 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             )
         else:
             self.async_dynamic_batch_tokenizer = None
+
+    def maybe_init_segment_encoder(self):
+        """Reuse the ids of prompt text between added tokens across requests."""
+        self.segment_encoder = (
+            None
+            if envs.SGLANG_DISABLE_PROMPT_SEGMENT_CACHE.get()
+            else SegmentCachedEncoder.build(self.tokenizer)
+        )
 
     def _validate_cuda_vmm_feature_transport_support(self) -> None:
         if get_mm().mm_feature_transport != "cuda_vmm":
@@ -998,7 +1008,16 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             and input_format == InputFormat.SINGLE_STRING
         )
 
-        if use_async_tokenizer:
+        if (
+            self.segment_encoder is not None
+            and input_format == InputFormat.SINGLE_STRING
+            and not is_cross_encoder
+        ):
+            # The encoder exists only for tokenizers that add no special tokens,
+            # so its ids match the plain tokenizer call below.
+            input_ids = [self.segment_encoder.encode(tokenizer_input[0])]
+            token_type_ids = None
+        elif use_async_tokenizer:
             logger.debug("Using async dynamic batch tokenizer for single text")
             result = await self.async_dynamic_batch_tokenizer.encode(
                 tokenizer_input[0], **tokenizer_kwargs

@@ -750,6 +750,9 @@ class DeepseekSparseAttnBackend(
         metadata: DSAMetadata,
         seqlens_32_2d: torch.Tensor,
     ) -> None:
+        # SM70 has no DeepGEMM. The Volta indexer scores without this schedule.
+        if deep_gemm is None:
+            return
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
             seqlens_32_2d, 64, deep_gemm.get_num_sms()
         )
@@ -1113,8 +1116,12 @@ class DeepseekSparseAttnBackend(
             # NOTE: block_kv arg must be 64 here — DG computes SPLIT_KV =
             # block_kv * 4 and both DG's and the indexer's compute kernels
             # require SPLIT_KV = 256; this is independent of the cache page size.
-            paged_mqa_schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                paged_mqa_ctx_lens_2d, 64, deep_gemm.get_num_sms()
+            paged_mqa_schedule_metadata = (
+                None
+                if deep_gemm is None
+                else deep_gemm.get_paged_mqa_logits_metadata(
+                    paged_mqa_ctx_lens_2d, 64, deep_gemm.get_num_sms()
+                )
             )
 
         metadata = DSAMetadata(
@@ -1501,8 +1508,12 @@ class DeepseekSparseAttnBackend(
             paged_mqa_ctx_lens_2d = self._build_paged_mqa_schedule_2d_ctx_lens(
                 forward_mode, cache_seqlens_int32, seqlens_expanded, bs
             )
-            paged_mqa_schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                paged_mqa_ctx_lens_2d, 64, deep_gemm.get_num_sms()
+            paged_mqa_schedule_metadata = (
+                None
+                if deep_gemm is None
+                else deep_gemm.get_paged_mqa_logits_metadata(
+                    paged_mqa_ctx_lens_2d, 64, deep_gemm.get_num_sms()
+                )
             )
 
         metadata = DSAMetadata(
@@ -2053,6 +2064,13 @@ class DeepseekSparseAttnBackend(
                 page_table_1
             ).to(torch.int32)
 
+        if self.device_capability == (7, 0):
+            if attn_sink is not None:
+                raise RuntimeError("SM70 sparse MLA does not support attention sinks")
+            return self._forward_sm70_sparse_mla(
+                q_nope, q_rope, kv_cache, page_table_1, layer.scaling
+            )
+
         if dsa_impl == "tilelang":
             if q_rope is not None:
                 # Cat-skip, as in forward_decode: q_rope=None means the caller
@@ -2330,6 +2348,13 @@ class DeepseekSparseAttnBackend(
                 page_table=metadata.page_table_1,
                 topk_indices=topk_indices,
                 page_size=1,
+            )
+
+        if self.device_capability == (7, 0):
+            if attn_sink is not None:
+                raise RuntimeError("SM70 sparse MLA does not support attention sinks")
+            return self._forward_sm70_sparse_mla(
+                q_nope, q_rope, kv_cache, page_table_1, layer.scaling
             )
 
         if dsa_impl == "flashmla_sparse":
@@ -3048,6 +3073,27 @@ class DeepseekSparseAttnBackend(
             sm_scale=sm_scale,
             d_v=v_head_dim,
         )
+
+    def _forward_sm70_sparse_mla(
+        self,
+        q_nope: torch.Tensor,
+        q_rope: torch.Tensor,
+        kv_cache: torch.Tensor,
+        indices: torch.Tensor,
+        sm_scale: float,
+    ) -> torch.Tensor:
+        from sglang.kernels.ops.attention.sparse_mla_sm70 import sparse_mla_sm70
+
+        tail = 0 if q_rope is None else q_rope.shape[-1]
+        if tail != 0:
+            raise RuntimeError(
+                f"SM70 sparse MLA is the NoPE path (rope tail 0); got tail {tail}"
+            )
+        if q_nope.shape[-1] != 512:
+            raise RuntimeError(
+                f"SM70 sparse MLA latent must be 512, got {q_nope.shape[-1]}"
+            )
+        return sparse_mla_sm70(q_nope, kv_cache, indices, sm_scale)
 
     def _forward_triton_decode(
         self,

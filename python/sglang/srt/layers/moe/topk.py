@@ -1020,6 +1020,8 @@ def fused_topk(
         and renormalize
         and correction_bias is None
         and scoring_func == "softmax"
+        and routed_scaling_factor in (None, 1.0)
+        and not apply_routed_scaling_factor_on_output
     ):
         from sglang.kernels.ops.moe.sm70_nvfp4_moe_decode import (
             sm70_nvfp4_moe_decode_available,

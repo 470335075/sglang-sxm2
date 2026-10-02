@@ -1846,6 +1846,11 @@ class ColumnParallelBatchedLinear(nn.Module):
         setattr(self.weight, "weight_loader", self.weight_loader)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.is_cuda:
+            from sglang.kernels.ops.gemm import sm70_rows_gemv
+
+            if sm70_rows_gemv.supported(input, self.weight):
+                return sm70_rows_gemv.bmm(input, self.weight)
         return torch.bmm(input, self.weight.transpose(-1, -2))
 
     def weight_loader(

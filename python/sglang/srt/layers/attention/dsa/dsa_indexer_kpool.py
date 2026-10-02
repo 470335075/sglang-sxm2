@@ -194,7 +194,14 @@ class IndexerKPool(MultiPlatformOp):
             self.compress_gate_stream = torch.cuda.Stream()
 
         if is_cuda():
-            self.sm_count = deep_gemm.get_num_sms()
+            # deep_gemm is SM90 paged-MQA. On SM70 the import is the exception
+            # object, and get_num_sms() dies while the indexer is constructed.
+            if isinstance(deep_gemm, BaseException):
+                self.sm_count = torch.cuda.get_device_properties(
+                    torch.cuda.current_device()
+                ).multi_processor_count
+            else:
+                self.sm_count = deep_gemm.get_num_sms()
             self.half_device_sm_count = ceil_align(self.sm_count // 2, 8)
 
         self.wq_b = ReplicatedLinear(
@@ -254,7 +261,30 @@ class IndexerKPool(MultiPlatformOp):
     ) -> torch.Tensor:
         return weights.unsqueeze(-1) * q_scale * self.softmax_scale
 
+    def _sm70_rows(self, x: torch.Tensor, weight: torch.Tensor):
+        """The row-exact SM70 GEMV module when it covers this projection, else None."""
+        if not x.is_cuda:
+            return None
+        from sglang.kernels.ops.gemm import sm70_rows_gemv
+
+        return sm70_rows_gemv if sm70_rows_gemv.supported(x, weight) else None
+
+    def _compress_gate_scores(self, x: torch.Tensor) -> torch.Tensor:
+        rows = self._sm70_rows(x, self.index_kpool_compress_gate)
+        if rows is not None:
+            return rows.linear(x, self.index_kpool_compress_gate)
+        return F.linear(x, self.index_kpool_compress_gate)
+
+    def _head_gates(self, x: torch.Tensor) -> torch.Tensor:
+        # The SM70 projection is an opaque op, so it stays outside torch.compile.
+        rows = self._sm70_rows(x, self.weights_proj.weight)
+        if rows is not None:
+            return rows.linear(x, self.weights_proj.weight) * self.n_heads**-0.5
+        return self._project_and_scale_head_gates(x)
+
     def _resolve_head_gate_weights(self, x, q_scale, head_weights):
+        if head_weights is None and self._sm70_rows(x, self.weights_proj.weight):
+            head_weights = self._head_gates(x)
         if head_weights is not None:
             return self._apply_q_scale_and_softmax_scale(head_weights, q_scale)
         return self._get_logits_head_gate(x, q_scale)
@@ -605,7 +635,7 @@ class IndexerKPool(MultiPlatformOp):
             return None
 
         if gate_score is None:
-            gate_score = F.linear(x, self.index_kpool_compress_gate)
+            gate_score = self._compress_gate_scores(x)
 
         if forward_batch.forward_mode.is_decode_or_idle():
             self._compress_write_decode(
@@ -638,7 +668,7 @@ class IndexerKPool(MultiPlatformOp):
     ) -> torch.Tensor:
         if gate_score is not None:
             return gate_score
-        return F.linear(x, self.index_kpool_compress_gate)
+        return self._compress_gate_scores(x)
 
     def _get_q_k_bf16(
         self,
@@ -671,7 +701,7 @@ class IndexerKPool(MultiPlatformOp):
                     dim=-1,
                 )
             if precompute_head_gate:
-                head_weights = self._project_and_scale_head_gates(x)
+                head_weights = self._head_gates(x)
             if not apply_rope:
                 query = rotate_activation(query)
             with torch.cuda.stream(self.alt_stream):
@@ -686,7 +716,7 @@ class IndexerKPool(MultiPlatformOp):
 
             if precompute_compress_gate:
                 with torch.cuda.stream(self.compress_gate_stream):
-                    gate_score = F.linear(x, self.index_kpool_compress_gate)
+                    gate_score = self._compress_gate_scores(x)
 
             current_stream.wait_stream(self.alt_stream)
         else:
@@ -930,6 +960,20 @@ class IndexerKPool(MultiPlatformOp):
                 )
             return logits
 
+        if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device) == (7, 0):
+            from sglang.kernels.ops.attention.mqa_logits_sm70 import (
+                fp8_mqa_logits_sm70,
+            )
+
+            return fp8_mqa_logits_sm70(
+                q_fp8,
+                (k_fp8, k_scale),
+                weights,
+                starts,
+                ends,
+                clean_logits=clean_logits,
+            )
+
         return deep_gemm.fp8_mqa_logits(
             q_fp8, (k_fp8, k_scale), weights, starts, ends, clean_logits=clean_logits
         )
@@ -992,6 +1036,9 @@ class IndexerKPool(MultiPlatformOp):
             not use_aiter_paged_mqa
             and self._should_use_tilelang_paged_mqa_logits(q_fp8)
         )
+        use_sm70_paged_mqa = (
+            q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device) == (7, 0)
+        )
 
         pool_seqlens, pool_context_lens, pool_block_tables, pool_schedule_metadata = (
             self._get_kpool_decode_metadata(
@@ -1000,7 +1047,7 @@ class IndexerKPool(MultiPlatformOp):
                 seqlens_32,
                 blocksize,
                 build_schedule_metadata=not (
-                    use_aiter_paged_mqa or use_tilelang_paged_mqa
+                    use_aiter_paged_mqa or use_tilelang_paged_mqa or use_sm70_paged_mqa
                 ),
             )
         )
@@ -1038,6 +1085,20 @@ class IndexerKPool(MultiPlatformOp):
                 pool_seqlens,
                 pool_block_tables,
                 pool_schedule_metadata,
+                pool_max_seq_len,
+                clean_logits=False,
+            )
+        elif use_sm70_paged_mqa:
+            from sglang.kernels.ops.attention.mqa_logits_sm70 import (
+                fp8_paged_mqa_logits_sm70,
+            )
+
+            logits = fp8_paged_mqa_logits_sm70(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8,
+                weights,
+                pool_context_lens,
+                pool_block_tables,
                 pool_max_seq_len,
                 clean_logits=False,
             )
