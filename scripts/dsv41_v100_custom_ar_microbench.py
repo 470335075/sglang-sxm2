@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""WO-14: time 10 KiB fp16 custom-AR vs NCCL, eager and CUDA-graph.
+"""Time 10 KiB fp16 custom-AR vs NCCL, eager and CUDA-graph.
 
 Launch (NVLink pair 0–4, then NVLink quad 0–3):
 
   CUDA_VISIBLE_DEVICES=0,4 SGLANG_CUSTOM_ALLREDUCE_ALGO=1stage \\
-    torchrun --standalone --nproc_per_node=2 scripts/dsv41_v100_wo14_ca_microbench.py
+    torchrun --standalone --nproc_per_node=2 scripts/dsv41_v100_custom_ar_microbench.py
 
   CUDA_VISIBLE_DEVICES=0,1,2,3 SGLANG_CUSTOM_ALLREDUCE_ALGO=1stage \\
-    torchrun --standalone --nproc_per_node=4 scripts/dsv41_v100_wo14_ca_microbench.py
+    torchrun --standalone --nproc_per_node=4 scripts/dsv41_v100_custom_ar_microbench.py
 """
 
 from __future__ import annotations

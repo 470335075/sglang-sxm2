@@ -2,8 +2,8 @@
 
 Measured September 25, 2026, on four V100-SXM2-32GB GPUs with
 `geesegeesegeese/sglang-v100:v100-qwen38-flash-next-v4` and
-`RadixArk/Qwen3.8-Flash-Next-NVFP4`. The full copyable Docker command is in
-the [serving README](../../README.md#serve-qwen38-flash-next-nvfp4-from-docker).
+`RadixArk/Qwen3.8-Flash-Next-NVFP4`. The current Docker setup is in the
+[README](../../README.md#docker).
 The test container used port 8083 and `HF_HUB_OFFLINE=1` with cached weights;
 the documented command uses port 8082 and permits downloads.
 

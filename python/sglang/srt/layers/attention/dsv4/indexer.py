@@ -834,7 +834,7 @@ class C4IndexerBackendMixin:
             if not _deep_gemm_indexer:
                 raise RuntimeError(
                     "DeepSeek V4 FP4 indexer requires SM90/SM100/SM120 DeepGEMM; "
-                    "SM70 uses the torch FP8 indexer (WO-K1 owns CSA2/indexer)."
+                    "SM70 uses the torch FP8 indexer."
                 )
             if envs.SGLANG_OPT_USE_TILELANG_INDEXER.get():
                 raise RuntimeError("DeepSeek V4 FP4 indexer requires DeepGEMM indexer.")

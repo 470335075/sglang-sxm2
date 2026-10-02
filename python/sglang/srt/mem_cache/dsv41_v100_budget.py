@@ -1,13 +1,12 @@
 """Per-rank HBM budget and dry-run allocator for DeepSeek-V4.1-Flash on 8×V100.
 
-Byte counts come from ``docs/v100/dsv41-flash-fit.md`` (HF 2026-09-10 checkpoint,
-~476 GiB on disk). This module does not download weights. It uses fake device
-memory: integers only.
+Byte counts come from the HF 2026-09-10 checkpoint (~476 GiB on disk). This
+module does not download weights. It uses fake device memory: integers only.
 
 v1 shape: TP8/EP8, language-model-only (no ViT, no DSpark), Engram on host,
 routed-expert spill ~8–12 GiB/GPU, np=1, chunked prefill 2k–4k, decode graph bs=4.
 
-``--with-dspark`` (WO-15 D15-0) does **not** fold ``mtp.*`` into the 384-expert
+``--with-dspark`` does **not** fold ``mtp.*`` into the 384-expert
 spill pile. Target still skips those weights; the draft worker keeps 128×3
 MXFP4 experts GPU-resident, plus landing 6·(γ+1), a second CUDA graph, SWA
 draft KV, aux-hidden at layers 37/38/39, and T=γ+1 verify workspace.
@@ -33,8 +32,7 @@ from sglang.srt.mem_cache.dsv41_host_placement import (
 )
 
 # ---------------------------------------------------------------------------
-# Fit-note stored sizes (GiB = 2**30). Keep these in lockstep with
-# docs/v100/dsv41-flash-fit.md and docs/v100/dsv41-v100-hbm-budget.md.
+# Stored sizes of the HF 2026-09-10 checkpoint (GiB = 2**30).
 # ---------------------------------------------------------------------------
 
 EXPERTS_ROUTED_DSPARK_MXFP4_GIB = 259.5
@@ -230,7 +228,7 @@ def _dspark_draft_kv_gib(
 
 
 def _dspark_target_graph_gib(gamma: int) -> float:
-    """One target-verify capture at width γ+1, decode_max_bs=1 (WO-15)."""
+    """One target-verify capture at width γ+1, decode_max_bs=1 ."""
     return 0.40 + 0.10 * (int(gamma) + 1)
 
 
@@ -390,9 +388,9 @@ def allocate(
         (
             "v1: --language-model-only, no --speculative-algorithm (no ViT, no DSpark)"
             if skip_dspark
-            else "WO-15: --language-model-only still skips ViT; DSpark is the draft worker, not a vision flag"
+            else "--language-model-only still skips ViT; DSpark is the draft worker, not a vision flag"
         ),
-        "Engram ~189 GiB lives on host when SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1 (WO-2 default on SM70)",
+        "Engram ~189 GiB lives on host when SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1 (default on SM70)",
         f"routed-expert LRU spill {spill:.1f} GiB/rank; attention stays GPU",
         f"D4-G landing {int(landing_slots)} slots = {landing:.2f} GiB (relaunch104: 6 slots / 107.6 MiB)",
         "--cpu-offload-gb would page whole layers including CSA2/indexer: see tax in the spreadsheet",

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// WO-13 D4-G: decode-path UVA page-in of spilled MXFP4 expert rows.
+// Decode-path UVA page-in of spilled MXFP4 expert rows.
 // Assigns misses to landing slots and copies host-mapped rows into a shared
 // GPU landing pool. Prefill keeps the Python LRU; this kernel is capturable.
 #include <sgl_kernel/tensor.h>

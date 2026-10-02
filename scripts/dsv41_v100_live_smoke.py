@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WO-10 smokes against a live DeepSeek-V4.1-Flash server."""
+"""Smokes against a live DeepSeek-V4.1-Flash server."""
 
 from __future__ import annotations
 

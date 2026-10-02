@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WO-12 np=1 decode tok/s + TTFT against a live Flash server."""
+"""np=1 decode tok/s + TTFT against a live Flash server."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def meta_slice(out: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--base", default="http://127.0.0.1:11435")
-    p.add_argument("--out", default="/tmp/dsv41-wo12/baseline.json")
+    p.add_argument("--out", default="/tmp/dsv41-decode-baseline.json")
     p.add_argument("--decode-new", type=int, default=32)
     p.add_argument(
         "--prefills",

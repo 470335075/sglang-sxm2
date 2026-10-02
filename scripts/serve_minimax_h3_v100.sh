@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Serve MiniMax-H3 on four V100s. fl2va is text and keyframes; ref2va is
 # reference image, video, and audio. One process loads one partition.
-# Setup and use guideline is in docs/v100/H3_VIDEO.md.
+# Setup and use guideline is in docs/v100/MiniMax-H3.md.
 #
 # Usage (from the repo root):
 #   bash scripts/serve_minimax_h3_v100.sh            # fl2va: t2va and keyframes
@@ -21,8 +21,8 @@ case "$VARIANT" in
   *) echo "variant must be fl2va or ref2va" >&2; exit 1 ;;
 esac
 
-VENV="${SGLANG_V100_VENV:-$HOME/work/sglang-v100-venv}"
-[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-$VENV}"
+VENV="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}"
+[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-${CONDA_PREFIX:-$VENV}}"
 [[ -x "$VENV/bin/sglang" ]] || { echo "no sglang in $VENV; set SGLANG_V100_VENV" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${H3_MODEL:-$HOME/models/MiniMax-H3}"
@@ -40,7 +40,7 @@ for _v in 14 13 12; do
 done
 export TORCH_CUDA_ARCH_LIST=7.0
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export NCCL_P2P_LEVEL=NVL
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$REPO"

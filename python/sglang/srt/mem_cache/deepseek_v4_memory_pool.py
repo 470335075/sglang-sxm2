@@ -1191,7 +1191,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         self._init_paged_compress_states(enable_memory_saver)
 
         # V4.1 ratio-1/2 KV is owned by kv_source layers. RequestWindow is off
-        # in v1 (SWA bounded replay is WO-12); construct it when the env is on
+        # in v1 (SWA bounded replay is future work); construct it when the env is on
         # so the HBM budget can include it without rewriting this pool later.
         self.kv_source_layers = list(kv_source_layers)
         self.request_window = None
@@ -1233,9 +1233,8 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
     ) -> None:
         """Replace paged SWA with RequestWindow (encoder SWA bounded replay).
 
-        v1 launch leaves ``SGLANG_ENABLE_DSV41_REQUEST_WINDOW`` off: this is the
-        pool configurator WO-M owns so WO-12 can flip the env without redoing
-        sizing. Attention stays on the GPU; the window is a small SWA workspace.
+        v1 launch leaves ``SGLANG_ENABLE_DSV41_REQUEST_WINDOW`` off: the pool
+        configurator sizes it anyway, so turning the env on needs no re-sizing. Attention stays on the GPU; the window is a small SWA workspace.
         """
         from sglang.srt.mem_cache.dsv41_request_window import RequestWindow
         from sglang.srt.runtime_context import get_schedule

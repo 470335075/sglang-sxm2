@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WO-13 D2: build the per-(layer, ep-rank) cold-expert table from
+"""Build the per-(layer, ep-rank) cold-expert table from
 expert-distribution recorder dumps (``--expert-distribution-recorder-mode stat``).
 
 Output: ``{"cold_ids": int64 [layers, ep, S]}`` with *local* routed expert ids

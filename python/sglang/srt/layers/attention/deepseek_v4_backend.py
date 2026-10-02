@@ -3319,7 +3319,7 @@ class DeepseekV4AttnBackend(
         if compress_ratio in (1, 2):
             raise NotImplementedError(
                 "DeepSeek-V4.1 ratio-1/2 CSA2 decode/prefill is SM70-only "
-                "in this tree (WO-K1). Hopper/DeepGEMM stay gated off."
+                "in this tree. Hopper/DeepGEMM stay gated off."
             )
 
         assert k is v, "DeepseekV4 shares k and v"

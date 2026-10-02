@@ -1,4 +1,4 @@
-"""Two-step collectives for the 8×V100 hybrid NVLink mesh (WO-12 / WO-13).
+"""Two-step collectives for the 8×V100 hybrid NVLink mesh.
 
 TP8 custom-AR is disabled: the eight cards are not a 1-hop clique. They *are*
 two full NVLink quads {0–3} and {4–7} with four NVLink bridges 0–4, 1–5, 2–6,
@@ -9,7 +9,7 @@ on the 8-rank NCCL communicator.
 Default backend is PyNCCL (CUDA-graph capturable). Custom-AR uses the
 pre-registered IPC staging buffer (never graph-pool pointer IPC —
 ``custom_all_reduce.cuh:614`` on V100). Pair CA is on whenever hier AR is
-on. Quad CA is behind ``SGLANG_DSV41_HIER_AR_CA`` (WO-14: in-graph 1-stage
+on. Quad CA is behind ``SGLANG_DSV41_HIER_AR_CA`` (in-graph 1-stage
 on the NVLink clique; relaunch57 lost that kernel only in eager).
 """
 

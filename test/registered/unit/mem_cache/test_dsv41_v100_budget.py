@@ -224,7 +224,7 @@ class TestRoutedExpertLru(CustomTestCase):
         self.assertGreater(plan.spill_gib, 8.0)
 
     def test_dspark_draft_moe_does_not_inherit_target_spill(self):
-        """WO-15: 12 GiB spill is for 384-expert target, not 128-expert draft."""
+        """12 GiB spill is for 384-expert target, not 128-expert draft."""
         from sglang.srt.environ import envs
         from sglang.srt.layers.moe.dsv41_expert_spill import plan_gpu_expert_slots
 
@@ -298,7 +298,7 @@ class TestRoutedExpertLru(CustomTestCase):
         self.assertEqual(int(mapped5[0, 1]), lru.physical_ids([6])[0])
 
     def test_cold_set_placement_gathers_original_rows(self):
-        """WO-13 D2: a non-tail cold set; every id must still gather its own row."""
+        """A non-tail cold set; every id must still gather its own row."""
         import random
 
         import torch
@@ -346,7 +346,7 @@ class TestRoutedExpertLru(CustomTestCase):
             self.assertTrue(torch.equal(lru.gather_rows([e])[0], w13[e]))
 
     def test_ensure_unique_exceeds_slots_thrashes_not_raises(self):
-        """WO-13 D3: prefill unique(batch) > n_kept_routed must not refuse."""
+        """Prefill unique(batch) > n_kept_routed must not refuse."""
         import torch
 
         # 3 routed + 1 shared; 2 GPU routed slots, 1 spilled host row.
@@ -514,7 +514,7 @@ class TestRoutedExpertLru(CustomTestCase):
             self.assertTrue(_decode_shaped_topk(ids2))
 
     def test_remap_t6_verify_is_decode_shaped_not_lru(self):
-        """WO-15 D15-1: T=6 target-verify must page-in, not prefill ensure()."""
+        """T=6 target-verify must page-in, not prefill ensure()."""
         import torch
         from torch import nn
         from unittest.mock import patch

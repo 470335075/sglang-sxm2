@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bucket an nsys sqlite export of T=6 TARGET_VERIFY (WO-15 Step 1).
+"""Bucket an nsys sqlite export of T=6 TARGET_VERIFY.
 
 nsys export stores kernel/NVTX names as StringIds integers. Join them.
 NVTX_EVENTS.globalTid and KERNEL.globalPid share a process key at id>>24.

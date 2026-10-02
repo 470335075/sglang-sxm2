@@ -3,7 +3,7 @@
 Used by ``DeepseekV4AttnBackend`` for ratio-0/1/2 layers on SM70. Hopper/DeepGEMM stay off.
 Replay flags are off: every query sees its exact 128-token window.
 
-D3 (WO-13): all per-sequence state lives in static, position-indexed device
+All per-sequence state lives in static, position-indexed device
 buffers so the bs=1 decode path has no host sync, no Python-side sequence
 state and a fixed launch shape (CUDA-graph capturable):
 

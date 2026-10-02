@@ -1,4 +1,4 @@
-"""WO-10 idea-2: scalar stats of DSV4.1 intermediates. Off unless DEBUG env is set.
+"""Scalar stats of DSV4.1 intermediates. Off unless DEBUG env is set.
 
 Does not dump full tensors. Catches NaN/Inf/RMS collapse/explosion/dead routes.
 Not a known-good oracle.

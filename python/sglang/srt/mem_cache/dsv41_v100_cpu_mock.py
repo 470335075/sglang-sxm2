@@ -1,4 +1,4 @@
-"""WO-3 CPU-mock: v1 launch shape without constructing the 189 GiB Engram graph.
+"""CPU mock: v1 launch shape without constructing the 189 GiB Engram graph.
 
 DoD: imports and config/quant selection succeed on CPU; the dry-run allocator
 dies with a **budget** error (exit 1) or NUMA error (exit 2), never an SM90
@@ -21,10 +21,10 @@ EXIT_NUMA = 2
 EXIT_SM90 = 3
 EXIT_CONFIG = 4
 
-OFFICIAL_CONFIG = "$HOME/models/DeepSeek-V4.1-Flash/config.json"
+OFFICIAL_CONFIG = os.path.expanduser("~/models/DeepSeek-V4.1-Flash/config.json")
 INDEX_CANDIDATES = (
     "/tmp/dsv41-flash-index/model.safetensors.index.json",
-    "$HOME/models/DeepSeek-V4.1-Flash/model.safetensors.index.json",
+    os.path.expanduser("~/models/DeepSeek-V4.1-Flash/model.safetensors.index.json"),
 )
 SERVE_SCRIPT = "scripts/serve_dsv41_v100.sh"
 

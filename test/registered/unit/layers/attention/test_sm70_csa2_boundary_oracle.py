@@ -1,7 +1,7 @@
 """GPU oracle: rewind SM70 CSA2 by restoring only the ring and pending.
 
 A stale ratio-2 pending pair or SWA ring still produces fluent attention.
-This checks the WO-17 path, not a full-state clone: prefill to a stop, copy
+This checks the stop-point resume path, not a full-state clone: prefill to a stop, copy
 the ring and pending through ``Csa2BoundaryStore``, overwrite them (and the
 compressed rows past the stop), restore, extend the real suffix, and match a
 one-shot prefill. Tolerance is the T=700 decode oracle (hidden atol/rtol

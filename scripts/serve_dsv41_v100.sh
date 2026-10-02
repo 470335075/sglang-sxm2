@@ -6,7 +6,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$HOME/sglang-v100-venv/bin:$PATH"
+export PATH="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}/bin:$PATH"
 export PYTHONPATH="${ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
 # V100 runtime pin is sglang-kernel 0.4.6.post1, not upstream 0.4.7.
 export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK="${SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK:-1}"
@@ -25,19 +25,19 @@ export SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT="${SGLANG_DSV41_ENGRAM_HOST_TABLE_L
 # Do not posix_fadvise(DONTNEED) the 476 GiB checkpoint; this array writes
 # swap at ~80 MB/s once page cache is gone.
 export SGLANG_ENABLE_DSV41_ENGRAM_DROP_PAGE_CACHE="${SGLANG_ENABLE_DSV41_ENGRAM_DROP_PAGE_CACHE:-0}"
-# WO-11 ablation. 1 = skip Engram residual (tables still mapped). Default 0.
+# Ablation. 1 = skip Engram residual (tables still mapped). Default 0.
 export SGLANG_DSV41_ENGRAM_ZERO="${SGLANG_DSV41_ENGRAM_ZERO:-0}"
-# WO-12 overlap. 1 = host gather on a side stream. Default on.
+# Overlap. 1 = host gather on a side stream. Default on.
 export SGLANG_DSV41_ENGRAM_OVERLAP="${SGLANG_DSV41_ENGRAM_OVERLAP:-1}"
 # Coarse HBM knob (GiB/rank of routed MXFP4 on host). Default 10 for greedy
-# Tree, 12 when DSPARK=1 (D15-0 slack). Set before this script to override.
+# Tree, 12 when DSPARK=1 (draft slack). Set before this script to override.
 # Do not iterate expert counts in engine code.
 # 10 GiB/rank spill is required to fit 32 GiB HBM on this 8×V100. LRU
 # ensure() is an eager breakable-CUDA-graph node; decode graphs stay on.
 export SGLANG_DSV41_EXPERT_SPILL_APPLY="${SGLANG_DSV41_EXPERT_SPILL_APPLY:-1}"
-# WO-13 D1: stripe the pinned spill mirror over both sockets (layer i -> node).
+# Stripe the pinned spill mirror over both sockets (layer i -> node).
 export SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES="${SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES:-1,0}"
-# WO-13 D2: per-(layer, rank) cold set from recorder dumps
+# Per-(layer, rank) cold set from recorder dumps
 # (scripts/dsv41_cold_set_from_dumps.py). Unset/missing file -> tail placement.
 DSV41_COLD_SET_DEFAULT="$HOME/dsv41-v100-logs/cold-set/dsv41_cold_set.pt"
 if [[ -z "${SGLANG_DSV41_EXPERT_SPILL_COLD_SET:-}" && -f "${DSV41_COLD_SET_DEFAULT}" ]]; then
@@ -50,7 +50,7 @@ export SGLANG_OPT_FP8_WO_A_GEMM="${SGLANG_OPT_FP8_WO_A_GEMM:-0}"
 # SGLANG_DSV41_ATTN_GLUE=0 restores pack + index_copy + KV gather.
 # SGLANG_DSV41_HOST_GEMV=1 enables host MXFP4 GEMV for spilled decode hits
 # (default off: packed CPU kernel still slower than D4-G UVA landing).
-# WO-M 0.88 assumed packed MXFP8; unpack-to-FP16 left ~0.58 GiB free.
+# The 0.88 pool fraction assumed packed MXFP8; unpack-to-FP16 left ~0.58 GiB free.
 # 0.99 keeps ~260 MiB for the 890 B/tok pool. Decode BCG is bs=1 (np=1).
 # V4 default max_running_requests=256 allocates req_to_token
 # [257, context_len] int32. v1 is np=1. SM70 CSA2 keeps SWA on rings,
@@ -65,7 +65,7 @@ export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION="${SGLANG_ENABLE_HEALTH_ENDPOINT
 # Pre-warm NCCL while the card is empty.
 # Decode is ~100 small f16 all-reduces/token. RING_LL on this hybrid mesh was
 # ~73% of GPU time (relaunch55). Tree for AllReduce; do not pin PROTO=LL
-# (that forced LL on 20 MiB prefill ARs and slowed 8k TTFT). WO-14: in-graph
+# (that forced LL on 20 MiB prefill ARs and slowed 8k TTFT). In-graph
 # pair+quad custom-AR is capturable but RankSignals-bound (~67 ms/tok) while
 # spill_copy is rank-divergent. Default stays 8-rank Tree. HIER_AR_CA stays 0.
 export NCCL_BUFFSIZE="${NCCL_BUFFSIZE:-2097152}"
@@ -74,7 +74,7 @@ export NCCL_MAX_NCHANNELS="${NCCL_MAX_NCHANNELS:-4}"
 export NCCL_ALGO="${NCCL_ALGO:-allreduce:tree}"
 export SGLANG_DSV41_HIER_AR="${SGLANG_DSV41_HIER_AR:-0}"
 export SGLANG_DSV41_HIER_AR_CA="${SGLANG_DSV41_HIER_AR_CA:-0}"
-# WO-15 DSpark. Default on: best measured TG on this 8×V100 box (coding
+# DSpark. Default on: best measured TG on this 8×V100 box (coding
 # ~8 tok/s, α~5.9). The ≥15 tok/s line is not met. DSPARK=1 sets landing
 # 36, spill 13 (12 left 8 MiB short of Engram's 300 MiB 8k unpack),
 # Markov BF16 off, and the speculative CLI flags. Keep
@@ -90,7 +90,7 @@ if [[ "${SGLANG_DSV41_DSPARK}" == "1" ]]; then
   # 256k is the ship window (page-aligned). CSA2 kv_rows scale with this
   # value; 512k has not been shown to leave 300 MiB for Engram unpack.
   export SGLANG_DSV41_CONTEXT_LEN="${SGLANG_DSV41_CONTEXT_LEN:-262144}"
-  # WO-15 Step 2: T=6 TARGET_VERIFY is packed CSA2 (no positions[0].item()).
+  # T=6 TARGET_VERIFY is packed CSA2 (no positions[0].item()).
   # Capture CSA2+mHC in the verify graph. Rollback 1 if capture hits a host sync.
   export SGLANG_DSV41_EAGER_CSA2_HC="${SGLANG_DSV41_EAGER_CSA2_HC:-0}"
   # D15-0: 0.99 spends slack on KV; T=6 verify capture then OOMs unpacking
@@ -133,7 +133,7 @@ fi
 # tree. A radix prefix hit skips hidden states and desyncs ratio-2 pending
 # (turn-3 crash: pos 511 layer 2). Keep radix off. Sticky last-seq pins the
 # resident image: exact continuation, or a shorter prefix that was recorded
-# at a prefill/request stop (WO-17). Anything else, including a second
+# at a prefill/request stop. Anything else, including a second
 # conversation, drops the pin and prefills from 0. /health does not.
 GRAPH_FLAGS+=(--disable-radix-cache)
 export SGLANG_DSV41_STICKY_LAST_SEQ="${SGLANG_DSV41_STICKY_LAST_SEQ:-1}"

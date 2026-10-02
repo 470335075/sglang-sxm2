@@ -197,9 +197,7 @@ def flush() -> None:
         return
     payload = _cur
     _cur = None
-    out_dir = envs.SGLANG_DEBUG_DSV41_ALIGN_DUMP_DIR.get() or (
-        "$HOME/dsv41-v100-logs/2026-09-18/align-dump"
-    )
+    out_dir = envs.SGLANG_DEBUG_DSV41_ALIGN_DUMP_DIR.get() or "dsv41-align-dump"
     os.makedirs(out_dir, exist_ok=True)
     rank = payload.get("rank", _rank())
     path = os.path.join(

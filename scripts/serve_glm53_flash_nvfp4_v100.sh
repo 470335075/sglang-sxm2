@@ -20,7 +20,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}"
-[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-$VENV}"
+[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-${CONDA_PREFIX:-$VENV}}"
 [[ -x "$VENV/bin/python" ]] || { echo "no venv at $VENV; set SGLANG_V100_VENV" >&2; exit 1; }
 MODEL="${GLM53_MODEL:-}"
 [[ -n "$MODEL" ]] || { echo "set GLM53_MODEL to the GLM-5.3-Flash-NVFP4 checkout" >&2; exit 1; }
@@ -33,7 +33,7 @@ export CC=/usr/bin/gcc-14 CXX=/usr/bin/g++-14 CUDAHOSTCXX=/usr/bin/g++-14
 export NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-14"
 export TORCH_CUDA_ARCH_LIST=7.0
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export NCCL_P2P_LEVEL=NVL
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
 export NCCL_ALGO="${NCCL_ALGO:-allreduce:tree}"
 export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_SM70_FORCE_FP16=1

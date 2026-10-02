@@ -7,9 +7,9 @@ rows.
 
 ``maybe_spill_model_routed_experts`` attaches the plan. Shrink + host copies
 happen only when ``SGLANG_DSV41_EXPERT_SPILL_APPLY`` is on. Prefill still
-``ensure()`` + ``map_ids`` (LRU; not CUDA-graph safe). Decode uses WO-13 D4-H
-(host MXFP4 GEMV via a mapped mailbox) when ``SGLANG_DSV41_HOST_GEMV`` is on,
-else D4-G UVA page-in into a shared landing pool. Both remap with a
+``ensure()`` + ``map_ids`` (LRU; not CUDA-graph safe). Decode uses a host
+MXFP4 GEMV via a mapped mailbox when ``SGLANG_DSV41_HOST_GEMV`` is on,
+else UVA page-in into a shared landing pool. Both remap with a
 capturable kernel so Marlin/GEMV can stay in the decode graph.
 """
 
@@ -239,7 +239,7 @@ def alloc_spill_host_buffers(moe: nn.Module, plan: RoutedExpertSpillPlan) -> Non
     # after Marlin pack (pin_spill_host_numa). Not registered here: pinning
     # 80 GiB before the load would only add to the loader's peak.
     #
-    # WO-13 D1: place them on the *same* NUMA node the pinned mirror of this
+    # Place them on the *same* NUMA node the pinned mirror of this
     # layer will use. With the default (preferred node 1) policy and node 1
     # full of Engram hugetlb, these 10 GiB/rank overflowed onto node 0 and
     # coexisted with the growing pinned node-0 half -> node-0 OOM
@@ -365,7 +365,7 @@ def repack_spill_host_for_sm70_marlin(moe: nn.Module) -> None:
 
 
 # cudaHostRegisterMapped: pins for DMA *and* maps into the CUDA address space
-# so a later in-graph UVA page-in (WO-13 D4-G) can read the mirror directly.
+# so a later in-graph UVA page-in can read the mirror directly.
 _CUDA_HOST_REGISTER_MAPPED = 0x02
 
 
@@ -445,13 +445,12 @@ def _pin_spill_hosts_on_node(
 
 
 def pin_spill_host_numa(moe: nn.Module, layer_ordinal: int) -> Optional[int]:
-    """WO-13 D1: move the packed host mirror into node-local THP mappings and
+    """Move the packed host mirror into node-local THP mappings and
     ``cudaHostRegister`` them (mapped).
 
     ``repack_spill_host_for_sm70_marlin`` leaves the rows as pageable tensors
     from the default allocator; under memory pressure those were paged out
-    and every LRU miss became a swap-in through the RAID (A.6 / B.4b of the
-    WO-13 plan). Layers are striped over the configured nodes so the mirror
+    and every LRU miss became a swap-in through the RAID. Layers are striped over the configured nodes so the mirror
     spreads across sockets. Spill=12 can exhaust the GPU-local node's THP
     remainder (1G hugepages already hold Engram); retry the other stripe
     node instead of aborting (explicit overflow, not silent UPI). Returns
@@ -544,7 +543,7 @@ def _load_cold_set_table(path: str) -> Optional[torch.Tensor]:
 
 
 def spill_placement(moe: nn.Module) -> tuple[List[int], List[int]]:
-    """WO-13 D2: (kept_ids, cold_ids) local routed ids for this (layer, ep rank).
+    """(kept_ids, cold_ids) local routed ids for this (layer, ep rank).
 
     Host row of a cold expert = its index in ``cold_ids``; GPU slot of a kept
     expert = its index in ``kept_ids``; shared experts follow the kept rows.
@@ -693,7 +692,7 @@ class RoutedExpertLru:
         self.n_spilled = n_spilled
         self.n_kept_routed = self.n_routed - n_spilled
         self._pin_memory = pin_memory
-        # WO-13 D2: which local routed ids start on host. Default = tail.
+        # Which local routed ids start on host. Default = tail.
         if cold_ids is None:
             cold_list = list(range(self.n_kept_routed, self.n_routed))
         else:
@@ -922,7 +921,7 @@ class RoutedExpertLru:
     _MRU_PROTECT = 8
 
     def _pick_victim(self, needed: set, current: Optional[int] = None) -> int:
-        """Slot to evict. WO-13 D2: among residents outside the MRU window,
+        """Slot to evict. Among residents outside the MRU window,
         prefer one whose home is the host mirror (a cold expert brought in
         earlier) over a kept expert, so the frequency-hot set stays on the
         GPU; otherwise the oldest resident. Never a slot needed by a

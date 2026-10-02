@@ -640,7 +640,7 @@ class GroupCoordinator:
             stack.enter_context(self.device_module.stream(stream))
             if ca_comm is not None:
                 stack.enter_context(ca_comm.capture())
-            # WO-14: hier CA copies through the pre-registered staging buffer
+            # Hier CA copies through the pre-registered staging buffer
             # (never graph-pool pointers). capture() then IPCs those
             # cudaMalloc buffers. Skipping it left rank_data slots empty.
             hier = getattr(self, "dsv41_hier_ar", None)

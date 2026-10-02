@@ -111,5 +111,6 @@ extension = load(
     verbose=True,
 )
 destination = repo / "python/sglang/kernels/prebuilt/_sm70_turbomind_v100.so"
+destination.parent.mkdir(parents=True, exist_ok=True)
 shutil.copy2(extension, destination)
 print(f"Installed {destination}")

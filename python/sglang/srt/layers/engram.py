@@ -1195,7 +1195,7 @@ class Engram(nn.Module):
             if not _ENGRAM_ZERO_LOGGED:
                 logger.warning(
                     "SGLANG_DSV41_ENGRAM_ZERO: skipping Engram gather/gate "
-                    "(WO-11 ablation; residual unchanged)"
+                    "(ablation; residual unchanged)"
                 )
                 _ENGRAM_ZERO_LOGGED = True
             return x

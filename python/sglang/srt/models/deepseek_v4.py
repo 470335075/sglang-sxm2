@@ -990,14 +990,14 @@ def dsv41_hc_mix_and_combine(
 
 
 def _dsv41_capture_attn_hc(fn):
-    """WO-13 D5: capture CSA2 + mHC in the decode graph unless rollback is set."""
+    """Capture CSA2 + mHC in the decode graph unless rollback is set."""
     if envs.SGLANG_DSV41_EAGER_CSA2_HC.get():
         return eager_on_graph(True)(fn)
     return fn
 
 
 def _dsv41_capture_moe(fn):
-    """WO-13 D4-G: capture MoE when landing page-in is on, unless rollback."""
+    """Capture MoE when landing page-in is on, unless rollback."""
     if envs.SGLANG_DSV41_EAGER_MOE_SPILL.get():
         return eager_on_graph(True)(fn)
     if int(envs.SGLANG_DSV41_SPILL_LANDING.get() or 0) <= 0:
@@ -1006,7 +1006,7 @@ def _dsv41_capture_moe(fn):
 
 
 def _dsv41_capture_engram(fn):
-    """WO-13 D5: capture Engram hash unless rollback is set."""
+    """Capture Engram hash unless rollback is set."""
     if envs.SGLANG_DSV41_EAGER_ENGRAM.get():
         return eager_on_graph(True)(fn)
     return fn
@@ -4158,7 +4158,7 @@ class DeepseekV4Model(nn.Module):
             and getattr(config, "hc_pre_from_prev_sublayer", False)
             else None
         )
-        # Host Engram gather vs previous layer (WO-12). Not the attention alt_streams.
+        # Host Engram gather vs previous layer. Not the attention alt_streams.
         self.engram_prefetch_stream = (
             device_module.Stream()
             if _is_cuda

@@ -1,4 +1,4 @@
-"""WO-13 D6: SM70 MXFP4 MoE decode GEMV (DeepSeek-V4.1-Flash, M<=4).
+"""SM70 MXFP4 MoE decode GEMV (DeepSeek-V4.1-Flash, M<=4).
 
 Consumes marlin_v100 packed MXFP4 + logical UE8M0. Not NVFP4 decode.
 """

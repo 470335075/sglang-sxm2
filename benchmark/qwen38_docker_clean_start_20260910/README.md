@@ -30,9 +30,9 @@ Only the test container/volume names, port 8083, and an isolated named model
 volume in place of the host cache bind mount differed. The exact argument list
 and empty-cache assertions are retained in [validation.json](validation.json).
 The container had no source or script bind mounts.
-The [current README command](../../README.md#serve-qwen38-flash-next-nvfp4-from-docker)
-expands the script's environment and server arguments directly, explicitly sets
-`--enable-multimodal`, and uses foreground `--rm` container lifecycle settings.
+The README's Docker command at the time
+expanded the script's environment and server arguments directly, explicitly set
+`--enable-multimodal`, and used foreground `--rm` container lifecycle settings.
 
 ## Results
 

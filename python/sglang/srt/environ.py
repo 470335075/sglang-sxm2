@@ -28,7 +28,7 @@ def _default_hip() -> bool:
 def _default_dsv41_engram_host_table() -> bool:
     """SM70 v1 cannot keep 189 GiB Engram tables in HBM.
 
-    Hopper/Blackwell keep the WO-1 False default (tables can sit on-device).
+    Hopper/Blackwell keep the False default (tables can sit on-device).
     The SM90/SM100/SM120 exclusion lets tests override those facts on a live
     V100 without flipping this default. Evaluated only when the env is unset.
     """
@@ -1672,16 +1672,16 @@ class Envs:
     # the mapping is at least 1 GiB. Tiny tests stay on 4K/THP. Fail loud if
     # the pool is short; do not silently fall back to 4 KiB.
     SGLANG_ENABLE_DSV41_ENGRAM_HUGETLB = EnvBool(True)
-    # WO-11 ablation: skip the Engram residual add (return x). Tables still load.
+    # Ablation: skip the Engram residual add (return x). Tables still load.
     # Default False is the real gather. Not a production kill-switch.
     SGLANG_DSV41_ENGRAM_ZERO = EnvBool(False)
-    # WO-12: host-table gather on a side stream, overlapped with the previous
+    # Host-table gather on a side stream, overlapped with the previous
     # layer. TP all-reduce / wkv / gate stay on the default stream. Off during
     # CUDA-graph capture. Default on for the host-table v1 path.
     SGLANG_DSV41_ENGRAM_OVERLAP = EnvBool(True)
-    # WO-12/14: TP all-reduce (and all-to-all) via two NVLink quads then the
+    # TP all-reduce (and all-to-all) via two NVLink quads then the
     # four cross-quad pairs (8×V100 hybrid mesh). Decode-sized tensors only.
-    # Default off. WO-14: in-graph custom-AR is capturable but RankSignals-
+    # Default off: in-graph custom-AR is capturable but RankSignals-
     # bound (~67 ms/tok) while spill_copy is rank-divergent; leave off.
     SGLANG_DSV41_HIER_AR = EnvBool(False)
     SGLANG_DSV41_HIER_AR_CA = EnvBool(False)
@@ -1691,11 +1691,11 @@ class Envs:
     # Bind expert-spill pins to the preferred NUMA node with THP. Does not
     # consume the Engram hugetlb pool.
     SGLANG_ENABLE_DSV41_EXPERT_SPILL_NUMA = EnvBool(True)
-    # WO-13 D1: NUMA nodes the packed spill mirror is striped over, by MoE
+    # NUMA nodes the packed spill mirror is striped over, by MoE
     # layer ordinal (layer i -> nodes[i % len]). Each node gets an equal share
     # so HtoD and (later) host GEMV can draw on both sockets' DRAM bandwidth.
     SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES = EnvTuple(("1", "0"))
-    # WO-13 D2: path to a torch file {"cold_ids": int64 [layers, ep, S]} with
+    # Path to a torch file {"cold_ids": int64 [layers, ep, S]} with
     # local routed expert ids in coldness order (coldest first) per
     # (layer, ep_rank); the first n_spilled become the host-resident set.
     # Built by scripts/dsv41_cold_set_from_dumps.py from expert-distribution
@@ -1707,42 +1707,42 @@ class Envs:
     # Shrink FusedMoE expert rows after attaching the spill plan. Marlin remaps
     # topk_ids through RoutedExpertLru; ensure() is an eager BCG break.
     SGLANG_DSV41_EXPERT_SPILL_APPLY = EnvBool(False)
-    # WO-13 D4-G: shared GPU landing slots for in-graph UVA page-in of spilled
+    # Shared GPU landing slots for in-graph UVA page-in of spilled
     # decode hits. 0 keeps the Python LRU on decode (and the MoE BCG break).
     SGLANG_DSV41_SPILL_LANDING = EnvInt(6)
-    # WO-15: box knob for the V100 serve script. Engine still keys off
-    # --speculative-algorithm DSPARK. Default off; D15-3 sets it in the script.
+    # Box knob for the V100 serve script. Engine still keys off
+    # --speculative-algorithm DSPARK. Default off; the serve script sets it.
     SGLANG_DSV41_DSPARK = EnvBool(False)
-    # WO-13 D4 rollback: keep decoder mlp/moe as BCG eager breaks even if
+    # Rollback: keep decoder mlp/moe as BCG eager breaks even if
     # landing slots are on.
     SGLANG_DSV41_EAGER_MOE_SPILL = EnvBool(False)
-    # WO-13 D5 rollback: keep CSA2 + mHC as BCG eager breaks. Default off so
+    # Rollback: keep CSA2 + mHC as BCG eager breaks. Default off so
     # those ops capture in the decode graph. MoE capture is separate
     # (SGLANG_DSV41_SPILL_LANDING / SGLANG_DSV41_EAGER_MOE_SPILL).
     SGLANG_DSV41_EAGER_CSA2_HC = EnvBool(False)
-    # WO-13 D5: keep Engram hash as a BCG eager break. Default off; decode
+    # Keep Engram hash as a BCG eager break. Default off; decode
     # hash is one Triton launch with a host-side forward_mode switch.
     SGLANG_DSV41_EAGER_ENGRAM = EnvBool(False)
-    # WO-13 D5: force `--cuda-graph-backend-decode breakable` even when
+    # Force `--cuda-graph-backend-decode breakable` even when
     # landing/MoE/CSA2 are capturable. Default off = one plain decode graph.
     SGLANG_DSV41_BREAKABLE_DECODE = EnvBool(False)
-    # WO-13 D6: SM70 MXFP4 decode GEMV (M<=4, DSV4.1 Flash shapes) instead of
+    # SM70 MXFP4 decode GEMV (M<=4, DSV4.1 Flash shapes) instead of
     # Marlin grouped GEMM. Default on; 0 falls back to the pinned Marlin CTA.
     SGLANG_DSV41_MOE_GEMV = EnvBool(True)
-    # WO-13 D6-d: fuse SM70 mHC mix_stats+Sinkhorn (and combine) into one CTA.
+    # Fuse SM70 mHC mix_stats+Sinkhorn (and combine) into one CTA.
     # Default on; 0 keeps the four unfused launches.
     SGLANG_DSV41_MHC_FUSION = EnvBool(True)
-    # WO-13 D6-e: keep dense MXFP8 as e4m3+UE8M0 g32 (decode GEMV M<=4).
+    # Keep dense MXFP8 as e4m3+UE8M0 g32 (decode GEMV M<=4).
     # marlin_v100 FP8 W8A16 has no group-32; 0 unpacks to FP16 as before.
     SGLANG_DSV41_MXFP8_W8A16 = EnvBool(True)
-    # WO-13 D6-f: SM70 CSA2 decode glue. Pack writes into the static ring/table
+    # SM70 CSA2 decode glue. Pack writes into the static ring/table
     # and sparse decode gathers KV in-kernel. 0 restores pack + index_copy +
     # gather + ring_valid.
     SGLANG_DSV41_ATTN_GLUE = EnvBool(True)
-    # WO-13 D4-H: host MXFP4 GEMV for spilled decode hits (mailbox + CPU
+    # Host MXFP4 GEMV for spilled decode hits (mailbox + CPU
     # workers overlapping the kept GPU GEMV). Default off: the marlin_v100
-    # packed CPU kernel is still ~11 ms/hit @ 4 threads vs D4-G ~1.6 ms UVA
-    # page-in. 1 restores H. Restart after toggling; the decode graph captures
+    # packed CPU kernel is still ~11 ms/hit @ 4 threads vs ~1.6 ms UVA
+    # page-in. 1 turns it on. Restart after toggling; the decode graph captures
     # whichever path ran at capture time.
     SGLANG_DSV41_HOST_GEMV = EnvBool(False)
     SGLANG_DSV41_HOST_GEMV_THREADS = EnvInt(4)
@@ -1754,7 +1754,7 @@ class Envs:
     # Next HTTP turn reuses KV only if new_ids starts with the last finished
     # sequence. Miss /health / flush drops the pin. Off in generic prod.
     SGLANG_DSV41_STICKY_LAST_SEQ = EnvBool(False)
-    # WO-17 phase 3: directory of N spilled CSA2 conversations. Unset keeps
+    # Directory of N spilled CSA2 conversations. Unset keeps
     # the one resident image only. Each rank writes its own file. LRU cap
     # is whole conversations, oldest first.
     SGLANG_DSV41_CSA2_SESSION_DIR = EnvStr(None)

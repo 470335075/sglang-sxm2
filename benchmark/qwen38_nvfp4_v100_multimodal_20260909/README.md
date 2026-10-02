@@ -113,7 +113,7 @@ libraries are version `7:6.1.1-3ubuntu5`, listed in
 [host source/dependencies](host_environment.json),
 [native V100 smoke checks](smoke.log).
 
-Build and serve using the [Docker v4 instructions](../../docs/v100/models/qwen38-flash-next-nvfp4.md#build-and-serve-the-optimized-qwen38-docker-v4-image).
+The current Docker setup is in the [README](../../README.md#docker).
 Against an otherwise idle server on port 8082:
 
 ```bash

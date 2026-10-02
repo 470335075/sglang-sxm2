@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WO-11 Engram on-vs-zero traces against a live Flash server. No H200."""
+"""Engram on-vs-zero traces against a live Flash server."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--base", default="http://127.0.0.1:11435")
     p.add_argument("--tag", required=True, help="on or zero")
-    p.add_argument("--out-dir", default="/tmp/dsv41-wo11")
+    p.add_argument("--out-dir", default="/tmp/dsv41-engram-ablate")
     p.add_argument("--timeout", type=int, default=1800)
     args = p.parse_args()
     out_dir = Path(args.out_dir)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WO-15 Step 1: warmup, arm CUDA_PROFILER on TARGET_VERIFY, run coding-1.
+"""Warmup, arm CUDA_PROFILER on TARGET_VERIFY, run coding-1.
 
 nsys must already be wrapping the serve process with
 --capture-range=cudaProfilerApi. This script only triggers Start/Stop via

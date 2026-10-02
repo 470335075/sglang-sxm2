@@ -25,7 +25,7 @@ case "$MODE" in target|mtp) ;; *) echo "mode must be 'target' or 'mtp'" >&2; exi
 # Override with SGLANG_V100_VENV; defaults to a sibling venv or an already
 # activated environment.
 VENV="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}"
-[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-$VENV}"
+[[ -x "$VENV/bin/python" ]] || VENV="${VIRTUAL_ENV:-${CONDA_PREFIX:-$VENV}}"
 [[ -x "$VENV/bin/python" ]] || { echo "no venv at $VENV; set SGLANG_V100_VENV" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${FLASH_NEXT_MODEL:-}"
@@ -57,7 +57,7 @@ done
 export TORCH_CUDA_ARCH_LIST=7.0
 # V100 runtime env (same set as the README's Flash-Next commands)
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export NCCL_P2P_LEVEL=NVL
+export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
 export SGLANG_CUSTOM_ALLREDUCE_ALGO=1stage
 # 4x V100 PCIe-only (no NVLink, P2P via one PLX): NCCL_P2P_LEVEL=PXB and
 # SGLANG_CUSTOM_AR_ALLOW_PCIE=1 (default off; one-shot push, 128 KiB cap).
