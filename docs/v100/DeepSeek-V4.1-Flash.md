@@ -2,7 +2,7 @@
 
 The most capable model this engine serves, for reasoning and world knowledge. As far as we know, no other engine runs it on V100s for local agentic coding. It is slow; it runs.
 
-Official `deepseek-ai/DeepSeek-V4.1-Flash` on 8× V100-SXM2-32GB. This build has carried a multi-hour Claude Code session on a single conversation. Continuations that match a recorded chunk or request stop are not re-prefilled (a few dozen new tokens is a few seconds). A suffix of several thousand tokens that was never computed is still about 60 tok/s: each rank holds 30 experts on the GPU and a chunk often touches more, so the spill cache thrashes inside the chunk. Each rank's weight load reads only the experts it owns, and the draft reads only `mtp.*`. On this 8-card shape that was 1347 s for the target and 17 s for the draft, about 24 minutes until the server was ready. Set up host memory before the first launch ([below](#host-memory)).
+Official `deepseek-ai/DeepSeek-V4.1-Flash` on 8× V100-SXM2-32GB. This build has carried a multi-hour Claude Code session on a single conversation. Continuations that match a recorded chunk or request stop are not re-prefilled (a few dozen new tokens is a few seconds). A suffix of several thousand tokens that was never computed runs at about 300 tok/s: each rank holds 30 of its 48 experts on the GPU, and prefill copies the spilled experts a chunk uses from host memory over PCIe, which is most of the prefill time. Expect about 14 minutes from launch to ready (measured twice on 2026-10-04: 2× Xeon Gold 6130, 352 GB RAM, checkpoint on a PCIe NVMe SSD). Set up host memory before the first launch ([below](#host-memory)).
 
 ## Get the model
 
@@ -36,23 +36,23 @@ Two large host-side pieces, both on the NUMA node(s) next to the GPUs. Find that
   default_hugepagesz=1G hugepagesz=1G hugepages=1:190
   ```
 
-  `hugepages=<node>:<count>` reserves on one node. Then set `SGLANG_DSV41_ENGRAM_NUMA_NODE=<node>` (script default 1).
-- **Pinned expert spill, 13 GiB per GPU** (~104 GiB), on transparent huge pages, not from the hugetlb pool. It is striped layer by layer over `SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES` (default `1,0`, both sockets). On a single-socket host set both variables to `0`.
+  `hugepages=<node>:<count>` reserves on one node. The server finds the GPUs' node at startup; `SGLANG_DSV41_ENGRAM_NUMA_NODE=<node>` overrides it.
+- **Pinned expert spill, 13 GiB per GPU** (~104 GiB), on transparent huge pages, not from the hugetlb pool. It is striped layer by layer over the GPU-local node first, then the other nodes (both sockets on a two-socket host, one node on a single-socket host). `SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES=1,0` sets the list by hand.
 
 If another model was loaded just before, the second node can be full of page cache and the spill pin fails with `mbind(MPOL_BIND, node=0, ...) failed errno=5`. Drop the cache first: `sync; echo 1 | sudo tee /proc/sys/vm/drop_caches`.
 
 ## Measured performance
 
-2026-09-24, `llm-decode-bench` 0.6.2, the 8-card recipe (DSpark on, sticky last-seq, radix cache off, advertised 256k, `np=1`). Temperature 0. The server was not started with `--enable-metrics`, so this run has no speculative-accept gauge. The ship script pins `--max-running-requests 1`.
+Undated rows are 2026-09-24, `llm-decode-bench` 0.6.2; the 2026-10-04 row is a streamed chat request on `scripts/serve_dsv41_v100.sh` as committed. Both use the 8-card recipe (DSpark on, sticky last-seq, radix cache off, advertised 256k, `np=1`). Temperature 0. The server was not started with `--enable-metrics`, so this run has no speculative-accept gauge. The ship script pins `--max-running-requests 1`.
 
 | check | result |
 |---|---|
-| Coding peak, `merge_sorted`, natural stop at 104 tokens, 3 runs | **9.3** tok/s median (8.8–9.3) |
+| Coding, `merge_sorted`, natural stop at 101 tokens, 3 runs (2026-10-04) | **7.6** tok/s (all three runs) |
 | Sustained padding decode, 20 s, `ignore_eos` | **2.8** tok/s (ITL 322 ms) |
 | Cold prefill scout, server counted 5,286 prompt tokens | TTFT **45.3 s**, **117** tok/s |
 | Warmer one-token prefill, 8,004 tokens, spill already touched | TTFT **14.3 s**, **558** tok/s |
 
-The 2.8 tok/s cell is greedy padding, the case this model loops on. It is a different number from the 9.3 tok/s coding rate and from the ~60 tok/s uncached suffix above. The 117 tok/s scout is the cold first touch; 558 tok/s is the same box after that spill was already warm. Temperature 0 is right for short code and wrong for long prose. Use `temperature=1`, `top_p=0.95` for chat. The ship script leaves `/health` as a liveness probe (no generation), so a load balancer GET does not drop the sticky pin.
+The 2.8 tok/s cell is greedy padding, the case this model loops on. It is a different number from the 7.6 tok/s coding rate and from the ~300 tok/s uncached suffix above. The 117 tok/s scout is the cold first touch; 558 tok/s is the same box after that spill was already warm. Temperature 0 is right for short code and wrong for long prose. Use `temperature=1`, `top_p=0.95` for chat. The ship script leaves `/health` as a liveness probe (no generation), so a load balancer GET does not drop the sticky pin.
 
 ## Reference recipe
 
@@ -74,6 +74,7 @@ export SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT=private
 export SGLANG_DSV41_EXPERT_SPILL_APPLY=1
 export SGLANG_DSV41_EXPERT_SPILL_GB=13
 export SGLANG_DSV41_SPILL_LANDING=36
+export SGLANG_DSV41_PREFILL_LANDING=1
 export SGLANG_DSV41_STICKY_LAST_SEQ=1
 export NCCL_ALGO=allreduce:tree
 export NCCL_BUFFSIZE=2097152
@@ -110,9 +111,10 @@ python -m sglang.launch_server \
 |---|---|---|
 | DSpark | on (`γ=5` from the checkpoint) | Best measured TG on this box. `SGLANG_DSV41_DSPARK=0` is greedy Tree |
 | sticky last-seq | on | One resident conversation. Exact continuation, or a shorter prefix saved at a chunk or request stop. Anything else, including a second conversation, drops the pin and prefills from 0. Radix stays off (a radix hit desyncs CSA2 pending state) |
-| context / max tokens | 262144 | Advertised window. 8k prefill is what has been smoked; 512k has not left ~300 MiB for the Engram MXFP8 unpack |
+| context / max tokens | 262144 | Advertised window. 8k, 32k and 250k prefills are smoked (250k takes about 17 minutes); 512k has not left ~300 MiB for the Engram MXFP8 unpack |
 | `--mem-fraction-static` | 0.87 | 0.99 OOMs the Engram unpack on T=6 verify capture. 0.88 OOMed the same 300 MiB unpack on a 461-token sticky prefill (TP7 had 284 MiB). 0.86 raises: no KV pool after draft weights |
 | expert spill | 13 GiB/rank (landing 36) | Spill 12 left 8k ~8 MiB short of that unpack |
+| prefill landing | on | Prefill copies the spilled experts a chunk uses into the landing slots, with no swap back to host. 8.3k cold prefill 25 s, 300-700-token follow-ups 3-4 s (was 42 s and 5-6 s with the swap). `SGLANG_DSV41_PREFILL_LANDING=0` restores the GPU-slot swap |
 | `--max-running-requests` | 1 | DSpark would otherwise inflate this |
 | `--chunked-prefill-size` | 2048 | Vestigial SWA floor is sized for this chunk |
 
@@ -121,6 +123,6 @@ Leave `--speculative-dspark-block-size` at the checkpoint default. Checkpoint we
 ## Limitations
 
 - One conversation. A second session prefills from zero, and the resident image does not survive a restart.
-- A long suffix that was never computed runs at about 60 tok/s (the spill cache thrashes inside a prefill chunk).
+- A long suffix that was never computed runs at about 300 tok/s (each prefill chunk copies its spilled experts from host memory over PCIe).
 - A few GiB of HBM are left after load. Open-ended greedy decoding (temperature 0) can loop; use `temperature=1`, `top_p=0.95` for chat.
 - Image requests stream the rank-0 vision tower through GPU GEMMs: fine for casual use, not fast.

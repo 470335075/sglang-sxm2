@@ -1,6 +1,7 @@
 """NUMA placement for DSV4.1 Engram host tables and expert-spill pins.
 
-Bind mappings to ``SGLANG_DSV41_ENGRAM_NUMA_NODE`` (the GPU-local node).
+Bind mappings to the GPU-local node (``gpu_numa_node``, or
+``SGLANG_DSV41_ENGRAM_NUMA_NODE`` when set).
 Engram host tables may consume the boot-reserved 1 GiB hugetlb pool.
 Routed-expert spill must not take those pages: anonymous + THP on the
 preferred node. Fail loud rather than let Linux silently place pages
@@ -13,12 +14,17 @@ the V100 budget unit tests and dry-run, not runtime defaults.
 from __future__ import annotations
 
 import ctypes
+import functools
 import logging
 import mmap
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
+
+import torch
+
+from sglang.srt.environ import envs
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +63,33 @@ def memfd_create(name: str, flags: int) -> int:
         raise OSError(err, os.strerror(err), "memfd_create")
     return fd
 
-# Fallback when the env is unset. Launch scripts should set
-# SGLANG_DSV41_ENGRAM_NUMA_NODE to the GPU-local node.
-DEFAULT_GPU_NUMA_NODE = 1
+# GPU-local node of the measured 8x V100 box; default for the offline dry-run
+# planner only. Runtime placement uses gpu_numa_node().
+DOCUMENTED_GPU_NUMA_NODE = 1
+
+
+@functools.cache
+def gpu_numa_node() -> int:
+    """NUMA node of CUDA device 0 per sysfs, 0 when the host reports none.
+
+    Every TP rank sees the same visible-device list, so all ranks agree.
+    """
+    props = torch.cuda.get_device_properties(0)
+    bdf = f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
+    try:
+        with open(f"/sys/bus/pci/devices/{bdf}/numa_node") as f:
+            node = int(f.read().strip())
+    except (OSError, ValueError):
+        logger.warning("DSV4.1 host placement: no NUMA node for GPU %s; using node 0", bdf)
+        return 0
+    # Single-node hosts report -1.
+    return max(node, 0)
+
+
+def engram_numa_node() -> int:
+    """SGLANG_DSV41_ENGRAM_NUMA_NODE when set, else the GPU-local node. <0 disables binding."""
+    node = envs.SGLANG_DSV41_ENGRAM_NUMA_NODE.get()
+    return gpu_numa_node() if node is None else int(node)
 
 # Fixtures for test/registered/unit/mem_cache/test_dsv41_v100_budget.py.
 PRE_H1_NODE_TOTAL_GIB = {0: 177.0, 1: 173.0}
@@ -101,7 +131,7 @@ class HostPlacementPlan:
     mappings: list[HostMapping] = field(default_factory=list)
     huge_pages_total: int = 0
     huge_page_kB: int = 2048
-    preferred_node: int = DEFAULT_GPU_NUMA_NODE
+    preferred_node: int = DOCUMENTED_GPU_NUMA_NODE
     allow_split: bool = False
     warnings: list[str] = field(default_factory=list)
 
@@ -183,7 +213,7 @@ def plan_engram_host_tables(
     table_nbytes: Iterable[tuple[int, int]],
     layout: str,
     tp_size: int,
-    preferred_node: int = DEFAULT_GPU_NUMA_NODE,
+    preferred_node: int = DOCUMENTED_GPU_NUMA_NODE,
     allow_split: bool = False,
     extra_per_rank_bytes: int = 0,
     nodes: Optional[dict[int, NumaNodeMem]] = None,

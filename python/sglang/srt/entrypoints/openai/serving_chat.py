@@ -1663,6 +1663,11 @@ class OpenAIServingChat(OpenAIServingBase):
                 extra_template_kwargs.update(request.chat_template_kwargs)
 
             rc = self.template_manager.reasoning_config
+            effort = extra_template_kwargs.get("reasoning_effort")
+            if rc is not None and isinstance(effort, str):
+                extra_template_kwargs["reasoning_effort"] = dict(
+                    rc.effort_aliases
+                ).get(effort, effort)
             if rc is not None and rc.effort_kwarg is not None:
                 if request.reasoning_effort == "low":
                     extra_template_kwargs.setdefault(rc.effort_kwarg, True)

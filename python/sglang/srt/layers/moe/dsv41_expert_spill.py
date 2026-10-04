@@ -18,6 +18,7 @@ from __future__ import annotations
 import gc
 import logging
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -26,9 +27,11 @@ from torch import nn
 
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.dsv41_host_placement import (
-    DEFAULT_GPU_NUMA_NODE,
     EngramNumaError,
+    engram_numa_node,
+    gpu_numa_node,
     mmap_numa_thp,
+    read_numa_nodes,
 )
 from sglang.srt.mem_cache.dsv41_v100_budget import (
     DEFAULT_SPILL_GIB,
@@ -275,6 +278,21 @@ def alloc_spill_host_buffers(moe: nn.Module, plan: RoutedExpertSpillPlan) -> Non
     moe._dsv41_expert_spill_plan = plan  # type: ignore[attr-defined]
 
 
+@contextmanager
+def _gc_scans_only_new_objects():
+    """Limit gc.collect() to objects created inside the block.
+
+    Repack and pin call gc.collect() several times per layer; with the loaded
+    model on the heap each full pass cost ~0.4 s (about half of the per-layer
+    time, py-spy). Tensors are still freed by refcount.
+    """
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+
+
 def repack_spill_host_for_sm70_marlin(moe: nn.Module) -> None:
     """Pack create-time host rows the same way GPU weights were packed.
 
@@ -376,7 +394,11 @@ def _spill_numa_nodes() -> List[int]:
             nodes.append(int(s))
         except ValueError:
             logger.warning("SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES: ignoring %r", s)
-    return nodes or [DEFAULT_GPU_NUMA_NODE]
+    if nodes:
+        return nodes
+    # Unset: the GPU-local node first, then the other memory nodes.
+    gpu = gpu_numa_node()
+    return [gpu, *sorted(n for n in read_numa_nodes() if n != gpu)]
 
 
 def _spill_numa_failover_order(preferred: int) -> List[int]:
@@ -404,7 +426,7 @@ def _pin_spill_hosts_on_node(
     total = 0
     registered = 0
     cudart = torch.cuda.cudart()
-    bind_node = node if node >= 0 else DEFAULT_GPU_NUMA_NODE
+    bind_node = node if node >= 0 else gpu_numa_node()
     try:
         for attr, t in hosts.items():
             t = t.contiguous()
@@ -754,9 +776,9 @@ class RoutedExpertLru:
             and host_bytes > 0
         )
         if use_numa:
-            node = int(envs.SGLANG_DSV41_ENGRAM_NUMA_NODE.get())
+            node = engram_numa_node()
             if node < 0:
-                node = DEFAULT_GPU_NUMA_NODE
+                node = gpu_numa_node()
             host_mm = mmap_numa_thp(host_bytes, node=node)
             if getattr(self, "_host_mms", None) is None:
                 self._host_mms = []
@@ -928,9 +950,9 @@ class RoutedExpertLru:
         currently-resident batch id while a non-needed occupant exists.
 
         Last resort (unique(batch) > n_slots): evict the oldest LRU occupant
-        that is not ``current``. Same slot may swap several times in one
-        prefill chunk; Marlin still sees a resident expert per id at compute
-        time, just not all unique ids at once.
+        that is not ``current``. The evicted id maps to -1 afterwards, so the
+        MoE path splits such batches into slot-sized passes first
+        (``run_moe_with_expert_spill``).
         """
         n = len(self._lru)
         protect = min(self._MRU_PROTECT, n // 2)
@@ -1470,6 +1492,193 @@ def remap_dispatch_for_expert_spill(moe: nn.Module, dispatch_output):
     return dispatch_output
 
 
+def _prefill_pass_groups(
+    lru: RoutedExpertLru, topk_ids: torch.Tensor
+) -> Optional[List[List[int]]]:
+    """Routed-id groups that each fit the GPU slots, or None for one pass.
+
+    A single ``ensure`` over more unique ids than slots evicts ids of the same
+    batch, and ``map_ids`` then sends their tokens to -1 (expert skipped).
+    Residents go in the first group so it needs the fewest swaps.
+    """
+    if _decode_shaped_topk(topk_ids):
+        return None
+    valid = topk_ids[topk_ids >= 0]
+    if not valid.numel():
+        return None
+    routed = [i for i in torch.unique(valid).tolist() if i < lru.n_routed]
+    slots = lru.n_kept_routed
+    if len(routed) <= slots:
+        return None
+    resident = [i for i in routed if i in lru._id_to_slot]
+    missing = [i for i in routed if i not in lru._id_to_slot]
+    room = slots - len(resident)
+    groups = [resident + missing[:room]]
+    rest = missing[room:]
+    groups += [rest[i : i + slots] for i in range(0, len(rest), slots)]
+    return groups
+
+
+def _map_pass(
+    lru: RoutedExpertLru,
+    logical: torch.Tensor,
+    group: List[int],
+    *,
+    include_shared: bool,
+) -> torch.Tensor:
+    """Physical ids for ``group`` (plus shared once); every other choice -1."""
+    before, before_thrash = lru.n_swaps, lru.n_thrash
+    lru.ensure(group)
+    _note_swaps(
+        lru.n_swaps - before, int(logical.shape[0]), lru.n_thrash - before_thrash
+    )
+    physical = lru.map_ids(logical)
+    member = torch.zeros(lru.n_experts, dtype=torch.bool, device=logical.device)
+    member[torch.tensor(group, dtype=torch.int64, device=logical.device)] = True
+    if include_shared:
+        member[lru.n_routed :] = True
+    keep = (logical >= 0) & member[logical.clamp(min=0).to(torch.int64)]
+    return torch.where(keep, physical, torch.full_like(physical, -1))
+
+
+def _prefill_reads_landing(moe: nn.Module, topk_ids: torch.Tensor) -> bool:
+    return (
+        bool(envs.SGLANG_DSV41_PREFILL_LANDING.get())
+        and getattr(moe, "_dsv41_landing_pool", None) is not None
+        and spill_landing_slots() > 0
+        and bool(topk_ids.numel())
+        and not _decode_shaped_topk(topk_ids)
+    )
+
+
+# Per-rank prefill landing telemetry: (layer-calls, host rows copied, tokens).
+_LANDING_STATS = [0, 0, 0]
+_LANDING_LOG_EVERY = 40 * 50  # ~50 prefill forwards of 40 MoE layers
+
+
+def _note_landing_rows(rows: int, n_tokens: int) -> None:
+    s = _LANDING_STATS
+    s[0] += 1
+    s[1] += rows
+    s[2] += n_tokens
+    if s[0] >= _LANDING_LOG_EVERY:
+        logger.info(
+            "DSV4.1 prefill landing: %.1f host rows copied per layer-call "
+            "(%.0f tokens per call, %d calls)",
+            s[1] / s[0], s[2] / s[0], s[0],
+        )
+        s[0] = s[1] = s[2] = 0
+
+
+def _host_row_runs(rows: List[int]) -> List[tuple[int, int, int]]:
+    """(first host row, first landing slot, length) for each run of
+    consecutive host rows, so each run is one copy per tensor."""
+    runs: List[tuple[int, int, int]] = []
+    for slot, row in enumerate(rows):
+        if runs and runs[-1][0] + runs[-1][2] == row:
+            first, first_slot, length = runs[-1]
+            runs[-1] = (first, first_slot, length + 1)
+        else:
+            runs.append((row, slot, 1))
+    return runs
+
+
+def _run_prefill_through_landing(
+    moe: nn.Module, lru: RoutedExpertLru, dispatch_output, apply
+):
+    """Prefill without GPU-slot swaps: copy the host rows this batch routes to
+    into the landing pool and run them as landing ids.
+
+    No write-back and no LRU change, so decode keeps the placed GPU set.
+    One host sync per layer picks the rows; kept ids run in pass 0 only.
+    """
+    pool: SpillLandingPool = moe._dsv41_landing_pool  # type: ignore[attr-defined]
+    hosts: Dict[str, torch.Tensor] = moe._dsv41_spill_host  # type: ignore[attr-defined]
+    topk_output = dispatch_output.topk_output
+    logical = topk_output.topk_ids
+    lru._ensure_device_tables(logical)
+    index = logical.clamp(min=0).to(torch.int64)
+    valid = logical >= 0
+    kept = torch.where(valid, lru._map_table[index], -1).to(logical.dtype)
+    host_row = torch.where(valid, lru._host_map_table[index], -1).to(logical.dtype)
+    rows = torch.unique(host_row[host_row >= 0]).tolist()
+    _note_landing_rows(len(rows), int(logical.shape[0]))
+    n_host = int(hosts[pool.attrs[0]].shape[0])
+    moe._dsv41_host_gemv_pending = False  # type: ignore[attr-defined]
+    combined = None
+    for start in range(0, max(len(rows), 1), pool.n_landing):
+        chunk = rows[start : start + pool.n_landing]
+        land_ids = None
+        if chunk:
+            for first, slot, length in _host_row_runs(chunk):
+                for attr in pool.attrs:
+                    pool.tensors[attr][slot : slot + length].copy_(
+                        hosts[attr][first : first + length], non_blocking=True
+                    )
+            slot_of_row = torch.full(
+                (n_host,), -1, dtype=logical.dtype, device=logical.device
+            )
+            slot_of_row[torch.tensor(chunk, device=logical.device)] = torch.arange(
+                len(chunk), dtype=logical.dtype, device=logical.device
+            )
+            land_ids = torch.where(
+                host_row >= 0, slot_of_row[host_row.clamp(min=0).to(torch.int64)], -1
+            )
+        moe._dsv41_land_ids = land_ids  # type: ignore[attr-defined]
+        ids = kept if start == 0 else torch.full_like(kept, -1)
+        out = apply(
+            layer=moe,
+            dispatch_output=dispatch_output._replace(
+                topk_output=topk_output._replace(topk_ids=ids)
+            ),
+        )
+        if combined is None:
+            combined = out
+        else:
+            combined = combined._replace(
+                hidden_states=combined.hidden_states + out.hidden_states
+            )
+    moe._dsv41_land_ids = None  # type: ignore[attr-defined]
+    return combined
+
+
+def run_moe_with_expert_spill(moe: nn.Module, dispatch_output, apply):
+    """``apply`` once, or once per slot-sized expert group with summed outputs.
+
+    The passes are exact: each (token, expert) choice runs in exactly one
+    pass, and the MoE output is a sum over choices.
+    """
+    lru = getattr(moe, "_dsv41_expert_lru", None)
+    topk_output = getattr(dispatch_output, "topk_output", None)
+    groups = None
+    if lru is not None and lru.applied and topk_output is not None:
+        if _prefill_reads_landing(moe, topk_output.topk_ids):
+            return _run_prefill_through_landing(moe, lru, dispatch_output, apply)
+        groups = _prefill_pass_groups(lru, topk_output.topk_ids)
+    if groups is None:
+        dispatch_output = remap_dispatch_for_expert_spill(moe, dispatch_output)
+        return apply(layer=moe, dispatch_output=dispatch_output)
+    moe._dsv41_host_gemv_pending = False  # type: ignore[attr-defined]
+    moe._dsv41_land_ids = None  # type: ignore[attr-defined]
+    logical = topk_output.topk_ids.clone()
+    combined = None
+    for index, group in enumerate(groups):
+        ids = _map_pass(lru, logical, group, include_shared=index == 0)
+        out = apply(
+            layer=moe,
+            dispatch_output=dispatch_output._replace(
+                topk_output=topk_output._replace(topk_ids=ids)
+            ),
+        )
+        if combined is None:
+            combined = out
+        else:
+            combined = combined._replace(
+                hidden_states=combined.hidden_states + out.hidden_states
+            )
+    return combined
+
+
 def maybe_spill_model_routed_experts(model: nn.Module) -> Optional[RoutedExpertSpillPlan]:
     """Attach a spill plan after Marlin pack, then pack host rows and build the LRU.
 
@@ -1527,9 +1736,10 @@ def maybe_spill_model_routed_experts(model: nn.Module) -> Optional[RoutedExpertS
         if not (apply and plan.n_spilled):
             continue
         if getattr(moe, "_dsv41_spill_host", None) is not None:
-            repack_spill_host_for_sm70_marlin(moe)
-            if pin_mirror:
-                pin_spill_host_numa(moe, layer_ordinal)
+            with _gc_scans_only_new_objects():
+                repack_spill_host_for_sm70_marlin(moe)
+                if pin_mirror:
+                    pin_spill_host_numa(moe, layer_ordinal)
         else:
             logger.warning(
                 "DSV4.1 spill APPLY: no _dsv41_spill_host on %s; "

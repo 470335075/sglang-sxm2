@@ -73,8 +73,9 @@ services:
       <<: *env
       MODEL_PATH: /models/DeepSeek-V4.1-Flash
       # Needs 1 GiB hugepages on the GPU-local NUMA node, reserved on the host.
-      SGLANG_DSV41_ENGRAM_NUMA_NODE: ${SGLANG_DSV41_ENGRAM_NUMA_NODE:-1}
-      SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES: ${SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES:-1,0}
+      # The server finds that node itself; these override it when set.
+      SGLANG_DSV41_ENGRAM_NUMA_NODE:
+      SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES:
       SGLANG_DSV41_CSA2_SESSION_DIR: /root/.cache/csa2-sessions
 
   h3:

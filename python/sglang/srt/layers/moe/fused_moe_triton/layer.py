@@ -1705,10 +1705,12 @@ class FusedMoE(torch.nn.Module):
         # TODO: consider using symmetric memory
         if getattr(self, "_dsv41_expert_lru", None) is not None:
             from sglang.srt.layers.moe.dsv41_expert_spill import (
-                remap_dispatch_for_expert_spill,
+                run_moe_with_expert_spill,
             )
 
-            dispatch_output = remap_dispatch_for_expert_spill(self, dispatch_output)
+            return run_moe_with_expert_spill(
+                self, dispatch_output, self.quant_method.apply
+            )
         return self.quant_method.apply(
             layer=self,
             dispatch_output=dispatch_output,

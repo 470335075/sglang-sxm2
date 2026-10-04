@@ -1661,9 +1661,9 @@ class Envs:
     # hugepage allocation when page cache is fragmented; costs a cold
     # checkpoint re-read. Leave off unless the launch script sets it.
     SGLANG_ENABLE_DSV41_ENGRAM_DROP_PAGE_CACHE = EnvBool(False)
-    # Preferred NUMA node for Engram host tables. Launch scripts should set
-    # this to the GPU-local node. -1 skips mbind (tests).
-    SGLANG_DSV41_ENGRAM_NUMA_NODE = EnvInt(1)
+    # NUMA node for Engram host tables. Unset: the node of the first visible
+    # GPU (sysfs). -1 skips mbind (tests).
+    SGLANG_DSV41_ENGRAM_NUMA_NODE = EnvInt(None)
     # If the preferred NUMA node cannot hold the tables, split layers/shards
     # across nodes instead of failing. Split gathers are cross-socket; fail
     # loud is the default so Linux cannot silently place pages off-node.
@@ -1694,7 +1694,8 @@ class Envs:
     # NUMA nodes the packed spill mirror is striped over, by MoE
     # layer ordinal (layer i -> nodes[i % len]). Each node gets an equal share
     # so HtoD and (later) host GEMV can draw on both sockets' DRAM bandwidth.
-    SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES = EnvTuple(("1", "0"))
+    # Unset: the GPU-local node first, then every other memory node.
+    SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES = EnvTuple(())
     # Path to a torch file {"cold_ids": int64 [layers, ep, S]} with
     # local routed expert ids in coldness order (coldest first) per
     # (layer, ep_rank); the first n_spilled become the host-resident set.
@@ -1710,6 +1711,9 @@ class Envs:
     # Shared GPU landing slots for in-graph UVA page-in of spilled
     # decode hits. 0 keeps the Python LRU on decode (and the MoE BCG break).
     SGLANG_DSV41_SPILL_LANDING = EnvInt(6)
+    # Prefill copies spilled rows into the landing slots instead of swapping
+    # them into GPU slots (no write-back, no host sync). 0 restores the LRU swap.
+    SGLANG_DSV41_PREFILL_LANDING = EnvBool(True)
     # Box knob for the V100 serve script. Engine still keys off
     # --speculative-algorithm DSPARK. Default off; the serve script sets it.
     SGLANG_DSV41_DSPARK = EnvBool(False)

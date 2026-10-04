@@ -55,10 +55,11 @@ from sglang.srt.runtime_context import (
     get_serving,
 )
 from sglang.srt.mem_cache.dsv41_host_placement import (
-    DEFAULT_GPU_NUMA_NODE,
     GIB,
     EngramNumaError,
     bind_buffer_to_numa_node,
+    engram_numa_node,
+    gpu_numa_node,
     memfd_create,
     mmap_hugetlb,
     read_huge_pages,
@@ -615,7 +616,7 @@ def _choose_engram_numa_node(
 
     Returns None when NUMA binding is disabled (env node < 0).
     """
-    preferred = int(envs.SGLANG_DSV41_ENGRAM_NUMA_NODE.get())
+    preferred = engram_numa_node()
     if preferred < 0:
         return None
     if layout == "shared" and rank_in_group != 0:
@@ -682,7 +683,7 @@ class _HostTable:
       private  one anonymous mapping per rank holding only its own rows.
                Tiny mappings stay on 4K/THP so unit tests do not grab a 1G page.
 
-    Placement is NUMA-bound to SGLANG_DSV41_ENGRAM_NUMA_NODE.
+    Placement is NUMA-bound to the GPU-local node, or SGLANG_DSV41_ENGRAM_NUMA_NODE when set.
     """
 
     def __init__(
@@ -719,7 +720,7 @@ class _HostTable:
                         charge, layout=layout, rank_in_group=0, name=name
                     )
                     if node is None:
-                        node = DEFAULT_GPU_NUMA_NODE
+                        node = gpu_numa_node()
                     mm, fd, map_bytes = mmap_hugetlb(
                         nbytes, node=node, page_bytes=page_bytes, shared=True, name=name
                     )
@@ -757,7 +758,7 @@ class _HostTable:
                     charge, layout=layout, rank_in_group=rank_in_group, name=name
                 )
                 if node is None:
-                    node = DEFAULT_GPU_NUMA_NODE
+                    node = gpu_numa_node()
                 mm, _, map_bytes = mmap_hugetlb(
                     nbytes, node=node, page_bytes=page_bytes, shared=False, name=name
                 )

@@ -792,6 +792,33 @@ class TestPrefillAdder(CustomTestCase):
         self.assertEqual(adder.can_run_list, [])
         req.set_extend_range.assert_not_called()
 
+    def test_ignore_eos_prefix_hit_on_disabled_cache_chunks_past_prefix(self):
+        """A cache can report disable=True and still return a prefix hit (the sticky
+        last-sequence wrapper); a chunked ignore_eos request must not crash the scheduler."""
+        self.mock_tree_cache.disable = True
+        self.mock_token_allocator.available_size.return_value = 1000
+        adder = self.create_adder(
+            self.create_running_batch(), rem_input_tokens=200, rem_chunk_tokens=16
+        )
+
+        req = self.create_mock_req("ignore_eos_prefix", priority=0, max_new_tokens=1)
+        req.sampling_params.ignore_eos = True
+        req.prefix_indices = list(range(8))
+        req.origin_input_ids = list(range(32))
+        req.full_untruncated_fill_ids = list(range(32))
+        req.last_node = MagicMock()
+        req.set_extend_range = MagicMock(
+            side_effect=lambda start, end: setattr(
+                req, "extend_range", Range(start, end)
+            )
+        )
+
+        adder.add_one_req(req, has_chunked_req=False, truncation_align_size=None)
+
+        self.assertEqual(adder.can_run_list, [req])
+        self.assertIs(adder.new_chunked_req, req)
+        self.assertEqual(req.extend_range, Range(8, 24))
+
     def create_sharded_adder(
         self,
         *,

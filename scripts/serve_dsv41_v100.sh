@@ -16,8 +16,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 MODEL="${MODEL_PATH:-$HOME/models/DeepSeek-V4.1-Flash}"
 export SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1
-# This machine: all 8 V100s sit on NUMA node 1; 194×1G hugepages on node 1.
-export SGLANG_DSV41_ENGRAM_NUMA_NODE="${SGLANG_DSV41_ENGRAM_NUMA_NODE:-1}"
+# Engram tables and the expert spill go to the GPUs' NUMA node, found at startup.
+# SGLANG_DSV41_ENGRAM_NUMA_NODE / SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES override.
 export SGLANG_DSV41_ENGRAM_NUMA_SPLIT=1
 # Private shards: each rank maps 1/TP of Engram. Shared memfd is one physical
 # copy but TP RSS mappings of the full table, which the OOM killer sums.
@@ -35,8 +35,9 @@ export SGLANG_DSV41_ENGRAM_OVERLAP="${SGLANG_DSV41_ENGRAM_OVERLAP:-1}"
 # 10 GiB/rank spill is required to fit 32 GiB HBM on this 8×V100. LRU
 # ensure() is an eager breakable-CUDA-graph node; decode graphs stay on.
 export SGLANG_DSV41_EXPERT_SPILL_APPLY="${SGLANG_DSV41_EXPERT_SPILL_APPLY:-1}"
-# Stripe the pinned spill mirror over both sockets (layer i -> node).
-export SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES="${SGLANG_DSV41_EXPERT_SPILL_NUMA_NODES:-1,0}"
+# Prefill copies the spilled experts a chunk uses into the landing slots
+# (no swap back to host). 0 restores the GPU-slot swap.
+export SGLANG_DSV41_PREFILL_LANDING="${SGLANG_DSV41_PREFILL_LANDING:-1}"
 # Per-(layer, rank) cold set from recorder dumps
 # (scripts/dsv41_cold_set_from_dumps.py). Unset/missing file -> tail placement.
 DSV41_COLD_SET_DEFAULT="$HOME/dsv41-v100-logs/cold-set/dsv41_cold_set.pt"

@@ -235,8 +235,39 @@ class TestStickyLastSequence(CustomTestCase):
         self.assertEqual(len(result.device_indices), 8)
         self.assertEqual(result.device_indices.tolist(), list(range(8)))
         self.assertEqual(nxt.kv.req_pool_idx, 0)
-        self.assertEqual(cache._last_ids, tuple(last))
+        self.assertEqual(cache._last_ids, tuple(last[:8]))
         self.assertEqual(cache._cuts, [8])
+
+    def test_each_tool_turn_resumes_at_the_previous_prompt_end(self):
+        """A turn's prompt-end stop must survive its own pin.
+
+        The next request re-renders the assistant reply, so it diverges inside
+        the pinned output and can only resume at that prompt end. Losing it
+        sent every turn back to the first prompt end.
+        """
+        cache, _, _, _ = self._make(row_len=64)
+        first = list(range(8))
+        cache.cache_unfinished_req(
+            _FakeReq(req_pool_idx=0, committed=8, allocated=8, origin=first)
+        )
+        self._pin(cache, origin=first, output=[8, 9])
+
+        second = first + [40, 41, 42, 43]
+        nxt = _FakeReq(req_pool_idx=None, committed=0, allocated=0, origin=[])
+        result = cache.match_prefix(MatchPrefixParams(key=_key(second), req=nxt))
+        self.assertEqual(len(result.device_indices), 8)
+        nxt.origin_input_ids = second
+        nxt.kv.kv_committed_len = nxt.kv.kv_allocated_len = len(second)
+        cache.cache_unfinished_req(nxt)
+        nxt.output_ids = [44, 45]
+        nxt.kv.kv_committed_len = nxt.kv.kv_allocated_len = len(second) + 2
+        cache.cache_finished_req(nxt, kv_len_to_handle=len(second) + 2)
+        self.assertIn(len(second), cache._cuts)
+
+        third = second + [50, 51]
+        last = _FakeReq(req_pool_idx=None, committed=0, allocated=0, origin=[])
+        result = cache.match_prefix(MatchPrefixParams(key=_key(third), req=last))
+        self.assertEqual(len(result.device_indices), len(second))
 
     def test_unfinished_stop_is_extend_end_not_the_sampled_token(self):
         cache, _, _, _ = self._make()

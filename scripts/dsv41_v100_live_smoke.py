@@ -126,16 +126,13 @@ def main() -> int:
             failed += 1
 
     if "effort" in steps:
-        print("=== reasoning_effort=25 ===", flush=True)
+        print("=== reasoning_effort=0.25 (budget 25) ===", flush=True)
         t0 = time.time()
         out = chat(
             args.base,
             [{"role": "user", "content": "Say the word ping and stop."}],
-            extra={
-                "max_tokens": 128,
-                "reasoning_effort": 25,
-                "chat_template_kwargs": {"reasoning_effort": 25},
-            },
+            # The API takes a tier or a float in [0, 0.99]; 0.25 is budget 25.
+            extra={"max_tokens": 128, "reasoning_effort": 0.25},
         )
         msg = out["choices"][0]["message"]
         reasoning = msg.get("reasoning") or msg.get("reasoning_content")

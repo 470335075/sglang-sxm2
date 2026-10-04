@@ -92,6 +92,29 @@ def _longest_cut(
     return best
 
 
+def _cuts_still_on(
+    cuts: Sequence[int],
+    ids: Sequence[int],
+    previous: Optional[tuple[int, ...]],
+    limit: int,
+) -> list[int]:
+    """Cuts that are stops of ``ids``.
+
+    A cut past ``len(previous)`` was stashed by the request now pinning, on
+    top of the image ``previous`` described, so it needs no comparison.
+    """
+    return [
+        length
+        for length in cuts
+        if 0 < length <= limit
+        and (
+            previous is None
+            or length > len(previous)
+            or tuple(ids[:length]) == previous[:length]
+        )
+    ]
+
+
 def _is_exact_continuation(new_ids: Sequence[int], last_ids: tuple[int, ...]) -> bool:
     n = len(last_ids)
     if n == 0 or len(new_ids) < n:
@@ -201,8 +224,12 @@ class StickyLastSequenceCache(BasePrefixCache):
         slot = self._slot
         slot.restore_to_req(req)
         self._free_tail(req.kv, prefix_len)
-        if prefix_len < len(self._last_ids):
+        pinned_len = len(self._last_ids)
+        if prefix_len < pinned_len:
+            # The tail past the cut is freed here and dropped by the worker
+            # restore, so the pin now describes only the shared prefix.
             self._cuts = [c for c in self._cuts if c <= prefix_len]
+            self._last_ids = self._last_ids[:prefix_len]
 
         device_indices = self.req_to_token_pool.req_to_token[
             req.kv.req_pool_idx, :prefix_len
@@ -212,7 +239,7 @@ class StickyLastSequenceCache(BasePrefixCache):
         logger.info(
             "sticky last-seq event=%s pinned=%d new=%d prefix=%d extend=%d cuts=%s",
             event,
-            len(self._last_ids),
+            pinned_len,
             len(new_ids),
             prefix_len,
             max(0, len(new_ids) - prefix_len),
@@ -483,7 +510,8 @@ class StickyLastSequenceCache(BasePrefixCache):
         request_load(saved_key)
         self._slot.restore_to_req(req)
         self._free_tail(req.kv, prefix_len)
-        self._last_ids = tuple(int(token) for token in meta.get("ids") or [])
+        saved_ids = tuple(int(token) for token in meta.get("ids") or [])
+        self._last_ids = saved_ids[:prefix_len]
         self._cuts = [
             int(cut) for cut in meta.get("cuts") or [] if 0 < int(cut) <= prefix_len
         ]
@@ -494,7 +522,7 @@ class StickyLastSequenceCache(BasePrefixCache):
         ].to(dtype=torch.int64)
         logger.info(
             "sticky last-seq event=session pinned=%d new=%d prefix=%d extend=%d cuts=%s",
-            len(self._last_ids),
+            len(saved_ids),
             len(params.key.raw_token_ids()),
             prefix_len,
             max(0, len(params.key.raw_token_ids()) - prefix_len),
@@ -593,12 +621,7 @@ class StickyLastSequenceCache(BasePrefixCache):
         self._last_ids = prefix
         self._last_extra_key = getattr(req, "extra_key", None)
         self._last_cache_salt = getattr(req, "cache_salt", None) or None
-        self._cuts = [
-            length
-            for length in self._cuts
-            if 0 < length <= pin_len
-            and (previous is None or tuple(ids[:length]) == previous[:length])
-        ]
+        self._cuts = _cuts_still_on(self._cuts, ids, previous, pin_len)
         if pin_len not in self._cuts:
             self._cuts.append(pin_len)
         self._cuts = evict_recent(self._cuts, BOUNDARY_KEEP)
@@ -636,13 +659,7 @@ class StickyLastSequenceCache(BasePrefixCache):
         self.req_to_token_pool.free(slot)
 
     def _note_cut(self, ids: Sequence[int], stop: Optional[int] = None) -> None:
-        previous = self._last_ids
-        if previous is not None:
-            self._cuts = [
-                length
-                for length in self._cuts
-                if length <= len(ids) and tuple(ids[:length]) == previous[:length]
-            ]
+        self._cuts = _cuts_still_on(self._cuts, ids, self._last_ids, len(ids))
         length = len(ids) if stop is None else int(stop)
         if length <= 0 or length > len(ids):
             return

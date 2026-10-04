@@ -36,6 +36,8 @@ curl http://127.0.0.1:11435/v1/messages \
 
 The model reasons before it answers (`glm45` parser), and tool calls come back as structured `tool_calls` (`glm47` parser). An empty `content` with a large `completion_tokens` means the reply hit `max_tokens` while still thinking.
 
+The model has three reasoning efforts: Low, High and Max. The server reads `reasoning_effort` (OpenAI) or `output_config.effort` (Anthropic, which Claude Code's effort setting sends) and maps it as follows: `minimal`/`low` to Low, `medium`/`high` to High, and `xhigh`/`max` (or no effort) to Max. Claude Code's default is `xhigh`, so it runs at Max.
+
 ## Measured performance
 
 2026-10-02, the reference recipe below: TP=8, MTP 3 steps / 4 draft tokens, `--max-running-requests 1`, temperature 0. KV pool 242,880 tokens, context 240,640.

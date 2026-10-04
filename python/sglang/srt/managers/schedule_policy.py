@@ -1528,7 +1528,13 @@ class PrefillAdder:
         if (x := self.prefill_max_requests) is not None and len(self.can_run_list) >= x:
             return AddReqResult.OTHER
 
-        if req.sampling_params.ignore_eos and getattr(self.tree_cache, "disable", True):
+        # A wrapper over a disabled radix (sticky last-sequence) still returns prefix
+        # hits; only the path below locks a prefix and chunks past it.
+        if (
+            req.sampling_params.ignore_eos
+            and getattr(self.tree_cache, "disable", True)
+            and len(req.prefix_indices) == 0
+        ):
             return self.add_one_req_ignore_eos(req)
 
         # Reserve page_size for page-alignment overhead: the paged allocator may

@@ -61,7 +61,7 @@ The same agent-loop test as GLM, on half the GPUs.
 
 DeepSeek-V4.1-Flash is the strongest model here for reasoning and world knowledge. It runs from the official checkpoint, with Engram tables in host RAM, experts spilled to the host, and sparse attention, on hardware it was never meant for. As far as we know, no other engine runs it on V100s, let alone for local agentic coding. It has carried a multi-hour Claude Code session.
 
-It is slow: about 9 tok/s on short code and ~560 tok/s warm prefill. The resident conversation is never re-prefilled. A turn that adds a few dozen tokens answers in a few seconds.
+It is slow: about 7.5 tok/s on short code and ~560 tok/s warm prefill. The resident conversation is never re-prefilled. A turn that adds a few dozen tokens answers in a few seconds.
 
 ### MiniMax-H3
 
@@ -157,12 +157,12 @@ export CLAUDE_CODE_ATTRIBUTION_HEADER=0   # keeps the prompt prefix stable, so t
 claude
 ```
 
-These models reason before they answer. An empty `content` with a large `completion_tokens` means the reply hit `max_tokens` while still thinking, so raise the limit.
+These models reason before they answer. An empty `content` with a large `completion_tokens` means the reply hit `max_tokens` while still thinking, so raise the limit. [Reasoning effort](docs/v100/Reasoning-Effort.md) lists how each model reads Claude Code's effort setting.
 
 ## Limitations
 
 - **One agent session per server** for GLM and DeepSeek (`--max-running-requests 1`). Further requests queue. Qwen takes up to three streams.
-- **DeepSeek-V4.1-Flash keeps one conversation resident.** A second conversation prefills from scratch, and a long uncached suffix runs at about 60 tok/s.
+- **DeepSeek-V4.1-Flash keeps one conversation resident.** A second conversation prefills from scratch, and a long uncached suffix runs at about 300 tok/s.
 - **Not soaked for days.** Qwen ran an hour of mixed load tests and DeepSeek a multi-hour Claude Code session. GLM is checked with benchmarks and GSM8K, with no multi-hour soak yet.
 - **Volta has no bf16 and no FP4/FP8 hardware.** Everything runs as fp16 with weight-only 4/8-bit kernels, so numerics differ slightly from a Hopper run of the same checkpoint.
 

@@ -4099,6 +4099,29 @@ class ServingChatTestCase(unittest.TestCase):
         self.assertNotIn("low_effort", kwargs)
         self.assertTrue(any("only 'low' reasoning effort" in m for m in logs.output))
 
+    def test_glm53_effort_aliases_keep_levels_ordered(self):
+        # GLM-5.3 renders every effort but low/high as Max; medium must not
+        # out-think high.
+        self.template_manager.chat_template_name = None
+        self.template_manager.reasoning_config = ReasoningToggleConfig(
+            special_case="always",
+            effort_aliases=(("minimal", "low"), ("medium", "high")),
+        )
+        self.chat.chat_encoding_spec = None
+        cases = {
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+        }
+        for effort, rendered in cases.items():
+            with self.subTest(effort=effort):
+                kwargs = self._run_jinja_with_effort(effort)
+                self.assertEqual(kwargs.get("reasoning_effort"), rendered)
+        self.assertNotIn("reasoning_effort", self._run_jinja_with_effort(None))
+
     def test_nemotron_nano_no_effort_kwarg(self):
         # Nano template has no low_effort, so effort_kwarg stays None and no
         # warning is emitted even for non-low effort.

@@ -20,12 +20,13 @@ from dataclasses import dataclass, replace
 from typing import Mapping, Optional
 
 from sglang.srt.mem_cache.dsv41_host_placement import (
-    DEFAULT_GPU_NUMA_NODE,
+    DOCUMENTED_GPU_NUMA_NODE,
     DOCUMENTED_NODE_TOTAL_GIB,
     GIB,
     EngramNumaError,
     HostPlacementPlan,
     NumaNodeMem,
+    engram_numa_node,
     plan_engram_host_tables,
     read_huge_pages,
     read_numa_nodes,
@@ -286,7 +287,7 @@ def allocate(
     host_engram: bool = True,
     engram_layout: str = "private",
     allow_numa_split: bool = False,
-    preferred_numa: int = DEFAULT_GPU_NUMA_NODE,
+    preferred_numa: int = DOCUMENTED_GPU_NUMA_NODE,
     request_window: bool = False,
     landing_slots: Optional[int] = None,
     dspark_gamma: int = DSPARK_GAMMA,
@@ -611,7 +612,7 @@ def format_report(result: BudgetResult) -> str:
             "GiB per rank. Fail line is 31.00 (exit 1 if any rank exceeds it). "
             f"Slack target is ≥{TARGET_SLACK_GIB:.0f} GiB at np=1.",
             "",
-            "Host placement (preferred node = SGLANG_DSV41_ENGRAM_NUMA_NODE):",
+            "Host placement (preferred node = GPU-local, or SGLANG_DSV41_ENGRAM_NUMA_NODE):",
         ]
     )
     by_node: dict[int, float] = {}
@@ -701,9 +702,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         lie = {"experts_kept_gib": args.lie_experts_kept_gib}
 
     node_totals = None
+    preferred_numa = DOCUMENTED_GPU_NUMA_NODE
     if args.probe_live_numa:
         live = read_numa_nodes(documented_fallback=False)
         node_totals = {n: m.total_gib for n, m in live.items()}
+        preferred_numa = engram_numa_node()
 
     try:
         result = allocate(
@@ -716,6 +719,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             host_engram=not args.no_host_engram,
             engram_layout=args.engram_layout,
             allow_numa_split=args.allow_numa_split,
+            preferred_numa=preferred_numa,
             request_window=args.request_window,
             landing_slots=args.landing_slots,
             dspark_gamma=args.dspark_gamma,
