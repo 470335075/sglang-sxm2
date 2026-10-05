@@ -76,6 +76,8 @@ if [[ "$GLM53_MTP_STEPS" -gt 0 ]]; then
     --speculative-num-draft-tokens "$((GLM53_MTP_STEPS + 1))")
 fi
 
+# --sleep-on-idle: without it the eight idle scheduler loops keep ~5.3 cores
+# busy (measured 2026-10-05).
 exec "$VENV/bin/python" -m sglang.launch_server \
   --trust-remote-code \
   --model-path "$MODEL" \
@@ -101,7 +103,8 @@ exec "$VENV/bin/python" -m sglang.launch_server \
   --mamba-radix-cache-strategy extra_buffer \
   --chunked-prefill-size 2048 \
   --max-prefill-tokens 2048 \
-  --warmups prefix_reuse \
+  --warmups prefix_reuse,sampling \
+  --sleep-on-idle \
   --context-length "${GLM53_CONTEXT_LENGTH:-$CONTEXT_LENGTH_DEFAULT}" \
   --mem-fraction-static "${GLM53_MEM_FRACTION:-$MEM_FRACTION_DEFAULT}" \
   --host "${SGLANG_V100_HOST:-0.0.0.0}" \

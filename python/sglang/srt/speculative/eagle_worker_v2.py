@@ -174,13 +174,14 @@ def _optional_graph_backend_types(specs) -> list:
     """Import the given backends, skipping any this build cannot provide.
 
     A non-MLA, non-sparse EAGLE worker never builds these, and a missing one
-    only narrows the isinstance test at the call site.
+    only narrows the isinstance test at the call site. An installed but
+    unloadable wheel (deep_gemm for CUDA 13 on cu128) raises other than ImportError.
     """
     backend_types = []
     for module_path, class_name in specs:
         try:
             module = importlib.import_module(module_path)
-        except ImportError as e:
+        except Exception as e:
             logger.debug(
                 "Draft-extend CUDA graph: %s is unavailable in this build (%s).",
                 class_name,

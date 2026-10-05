@@ -129,7 +129,8 @@ python -m sglang.launch_server \
   --mamba-radix-cache-strategy extra_buffer \
   --chunked-prefill-size 2048 \
   --max-prefill-tokens 2048 \
-  --warmups prefix_reuse \
+  --warmups prefix_reuse,sampling \
+  --sleep-on-idle \
   --context-length 240640 \
   --mem-fraction-static 0.935 \
   --speculative-algorithm EAGLE \
@@ -151,7 +152,8 @@ python -m sglang.launch_server \
 | `--context-length` | 240,640 | Kept below the pool so prompt plus completion always fits. Without MTP use 223,232 |
 | `--max-mamba-cache-size` / `--mamba-max-states-per-path` | 12 / 2 | A running request pins 4 slots and admission wants 3 free. With 8 slots a subagent call evicted the main session's states, which cost a 100k+ re-prefill on the next main turn |
 | prefill chunk | 2048 | The measured value. Larger chunks have not been tried with the memory a 0.935 pool leaves |
-| `--warmups prefix_reuse` | on | Loads the kernels of a cache hit and a grammar-constrained decode at startup. Otherwise they load on the first real tool turn, when little memory is free |
+| `--warmups prefix_reuse,sampling` | on | Loads the kernels of a cache hit and a grammar-constrained decode at startup, and builds FlashInfer's sampling module. Otherwise they load on the first real tool turn, when little memory is free, and the first sampled request waits for the build |
+| `--sleep-on-idle` | on | Without it the eight idle scheduler loops keep about 5 CPU cores busy. Decode speed is the same either way |
 | `--disable-custom-all-reduce` + `SGLANG_DSV41_HIER_AR*` | on | The 8-GPU mesh is two NVLink quads plus bridges. Custom all-reduce inside each quad, then across the bridge pair |
 
 Without MTP (`GLM53_MTP_STEPS=0` in the wrapper): drop the five `--speculative-*` lines and `SGLANG_NVFP4_CKPT_NVFP4_NEXTN_MOE`, and use `--mem-fraction-static 0.88 --context-length 223232`.

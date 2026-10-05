@@ -132,6 +132,7 @@ python -m sglang.launch_server \
   --enable-cache-report \
   --enable-metrics \
   --ple-offload-embedding \
+  --warmups sampling \
   --speculative-algorithm EAGLE \
   --speculative-draft-model-path "${FLASH_NEXT_MODEL}" \
   --speculative-num-steps 3 \
@@ -152,6 +153,7 @@ python -m sglang.launch_server \
 | write policy | `write_back` | `write_through` saturated the disk and made prefix readback collapse. Disk writes happen on eviction and shutdown |
 | `--ple-offload-embedding` | on | The 51 GB n-gram table stays in host RAM. On GPU it OOMs at load |
 | `--sleep-on-idle` | on | Without it each rank busy-spins a core while idle |
+| `--warmups sampling` | on | Builds FlashInfer's sampling kernels at startup. Otherwise the first sampled request waits for the build (about 90 s when the cache is cold) |
 | `--enable-cache-report` | on | Surfaces prefix-cache hits to Claude Code. The cache already hits without the flag; the flag only reports them |
 
 `target` drops the four `--speculative-*` lines.

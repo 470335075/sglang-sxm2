@@ -6,12 +6,24 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}/bin:$PATH"
+# With MGLRU on, the kernel swaps out the ranks' own memory ahead of the
+# checkpoint's page cache during the load (measured 2026-10-05, same code:
+# 102 GiB swapped out with it on, none with it off).
+if [[ -r /sys/kernel/mm/lru_gen/enabled && "$(cat /sys/kernel/mm/lru_gen/enabled)" != 0x0000 ]]; then
+  echo "serve_dsv41_v100.sh: MGLRU is on, so the load will swap heavily." \
+    "Turn it off first: echo n | sudo tee /sys/kernel/mm/lru_gen/enabled" >&2
+fi
+# Same CUDA_HOME as the other serve scripts: FlashInfer's JIT cache is keyed by
+# version and arch only, so a different path rebuilds it on every engine switch.
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="${SGLANG_V100_VENV:-$HOME/sglang-v100-venv}/bin:$CUDA_HOME/bin:$PATH"
 export PYTHONPATH="${ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
 # V100 runtime pin is sglang-kernel 0.4.6.post1, not upstream 0.4.7.
 export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK="${SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK:-1}"
 export CC=/usr/bin/gcc-14 CXX=/usr/bin/g++-14 CUDAHOSTCXX=/usr/bin/g++-14
 export NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-14"
+export TORCH_CUDA_ARCH_LIST=7.0
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 MODEL="${MODEL_PATH:-$HOME/models/DeepSeek-V4.1-Flash}"
@@ -38,12 +50,10 @@ export SGLANG_DSV41_EXPERT_SPILL_APPLY="${SGLANG_DSV41_EXPERT_SPILL_APPLY:-1}"
 # Prefill copies the spilled experts a chunk uses into the landing slots
 # (no swap back to host). 0 restores the GPU-slot swap.
 export SGLANG_DSV41_PREFILL_LANDING="${SGLANG_DSV41_PREFILL_LANDING:-1}"
-# Per-(layer, rank) cold set from recorder dumps
-# (scripts/dsv41_cold_set_from_dumps.py). Unset/missing file -> tail placement.
-DSV41_COLD_SET_DEFAULT="$HOME/dsv41-v100-logs/cold-set/dsv41_cold_set.pt"
-if [[ -z "${SGLANG_DSV41_EXPERT_SPILL_COLD_SET:-}" && -f "${DSV41_COLD_SET_DEFAULT}" ]]; then
-  export SGLANG_DSV41_EXPERT_SPILL_COLD_SET="${DSV41_COLD_SET_DEFAULT}"
-fi
+# Which experts spill to host, per (layer, rank): the coldest ones on recorded
+# traffic (scripts/dsv41_cold_set_from_dumps.py, EP8 local ids). Set it empty
+# for tail placement; a missing file logs an error and also falls back to tail.
+export SGLANG_DSV41_EXPERT_SPILL_COLD_SET="${SGLANG_DSV41_EXPERT_SPILL_COLD_SET-${ROOT}/scripts/dsv41_flash_cold_set_ep8.json}"
 # SM70 wo_a is dense MXFP8 (packed e4m3); DeepGEMM fp8_einsum is SM90+.
 export SGLANG_OPT_FP8_WO_A_GEMM="${SGLANG_OPT_FP8_WO_A_GEMM:-0}"
 
@@ -168,6 +178,9 @@ if [[ -n "${SGLANG_DSV41_NSYS_OUT:-}" ]]; then
   )
 fi
 
+# --sleep-on-idle: without it the eight idle scheduler loops keep ~5.7 cores
+# busy (measured 2026-10-04). Rank 0 then waits on the request socket and the
+# other ranks wait on rank 0; a new request wakes it at once.
 exec "${NSYS_WRAP[@]}" python -m sglang.launch_server \
   --model-path "${MODEL}" \
   --tp 8 --ep-size 8 \
@@ -181,12 +194,13 @@ exec "${NSYS_WRAP[@]}" python -m sglang.launch_server \
   --max-total-tokens "${SGLANG_DSV41_CONTEXT_LEN}" \
   --max-prefill-tokens "${SGLANG_DSV41_CONTEXT_LEN}" \
   --pre-warm-nccl \
-  --warmups dsv41_chunk \
+  --warmups dsv41_chunk,sampling \
   "${GRAPH_FLAGS[@]}" \
   --reasoning-parser deepseek-v41 \
   --tool-call-parser deepseekv41 \
   --trust-remote-code \
   --disable-custom-all-reduce \
+  --sleep-on-idle \
   "${SPEC_FLAGS[@]}" \
   --host "${SGLANG_V100_HOST:-${HOST:-0.0.0.0}}" \
   --port "${SGLANG_V100_PORT:-${PORT:-11435}}" \

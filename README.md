@@ -61,7 +61,7 @@ The same agent-loop test as GLM, on half the GPUs.
 
 DeepSeek-V4.1-Flash is the strongest model here for reasoning and world knowledge. It runs from the official checkpoint, with Engram tables in host RAM, experts spilled to the host, and sparse attention, on hardware it was never meant for. As far as we know, no other engine runs it on V100s, let alone for local agentic coding. It has carried a multi-hour Claude Code session.
 
-It is slow: about 7.5 tok/s on short code and ~560 tok/s warm prefill. The resident conversation is never re-prefilled. A turn that adds a few dozen tokens answers in a few seconds.
+It is slow: about 11 tok/s on short code, about 7 on prose, and ~560 tok/s warm prefill. The resident conversation is never re-prefilled. A turn that adds a few dozen tokens answers in a few seconds.
 
 ### MiniMax-H3
 
@@ -126,7 +126,7 @@ GLM53_MODEL=~/models/GLM-5.3-Flash-NVFP4 bash scripts/serve_glm53_flash_nvfp4_v1
 hf download RadixArk/Qwen3.8-Flash-Next-NVFP4 --local-dir ~/models/Qwen3.8-Flash-Next-NVFP4
 FLASH_NEXT_MODEL=~/models/Qwen3.8-Flash-Next-NVFP4 bash scripts/serve_qwen38_flash_next_nvfp4_v100.sh mtp
 
-# DeepSeek-V4.1-Flash, 8 GPUs (reserve 1 GiB hugepages first, see its page)
+# DeepSeek-V4.1-Flash, 8 GPUs (reserve 1 GiB hugepages and turn MGLRU off first, see its page)
 hf download deepseek-ai/DeepSeek-V4.1-Flash --local-dir ~/models/DeepSeek-V4.1-Flash
 MODEL_PATH=~/models/DeepSeek-V4.1-Flash bash scripts/serve_dsv41_v100.sh
 
@@ -180,6 +180,8 @@ Incorporates work from:
 
 - **[haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100)**: the original Volta port of SGLang, including the TileLang attention backend, the QSA and GDN kernels, the NVFP4 path for hardware without FP4, the TurboMind sm70 integration and the PLE host offload. Also [haohervchb/flashinfer](https://github.com/haohervchb/flashinfer) (sm70 FlashInfer) and [GooseLLM](https://github.com/haohervchb/GooseLLM) (TileLang FlashAttention for V100).
 - **[1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM)**: the vLLM fork for V100 whose TurboMind sm70 block-FP8 and FP16 MoE backend the build compiles.
+- **[Horacio Vico](https://github.com/hvico)** ([hvico/sglang-V100](https://github.com/hvico/sglang-V100)): the opt-in custom all-reduce over PCIe P2P for GPUs without NVLink (`SGLANG_CUSTOM_AR_ALLOW_PCIE`).
+- **[ltarcher](https://github.com/ltarcher)** ([ltarcher/sglang-v100-qwen3.8-flash-next](https://github.com/ltarcher/sglang-v100-qwen3.8-flash-next)): the import guards that treat an installed but unloadable DeepGEMM wheel as missing.
 
 Volta kernels by: [lmdeploy / TurboMind](https://github.com/InternLM/lmdeploy), [marlin_v100](https://github.com/zhinianqin/marlin_v100), [flash-attention-v100](https://github.com/ai-bond/flash-attention-v100), [v100-skinny](https://github.com/dnv2003/v100-skinny) (QPN8 FP8 decode GEMV), [CUTLASS](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer) and [TileLang](https://github.com/tile-ai/tilelang).
 

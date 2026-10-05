@@ -16,7 +16,9 @@ capturable kernel so Marlin/GEMV can stay in the decode graph.
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import math
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from sglang.srt.mem_cache.dsv41_host_placement import (
     engram_numa_node,
     gpu_numa_node,
     mmap_numa_thp,
+    node_available_bytes,
     read_numa_nodes,
 )
 from sglang.srt.mem_cache.dsv41_v100_budget import (
@@ -237,7 +240,6 @@ def alloc_spill_host_buffers(moe: nn.Module, plan: RoutedExpertSpillPlan) -> Non
     """Pinned host rows for spilled experts, matching each GPU expert-dim param."""
     if plan.n_spilled <= 0:
         return
-    hosts: Dict[str, torch.Tensor] = {}
     # Checkpoint-layout rows, filled by the weight loader; repacked and pinned
     # after Marlin pack (pin_spill_host_numa). Not registered here: pinning
     # 80 GiB before the load would only add to the loader's peak.
@@ -249,33 +251,103 @@ def alloc_spill_host_buffers(moe: nn.Module, plan: RoutedExpertSpillPlan) -> Non
     # (CONSTRAINT_MEMORY_POLICY) during repack. Same node keeps the per-node
     # footprint flat through the transition.
     node: Optional[int] = None
+    layer_id = int(getattr(moe, "layer_id", 0))
     use_numa = bool(envs.SGLANG_ENABLE_DSV41_EXPERT_SPILL_NUMA.get()) and torch.cuda.is_available()
     if use_numa:
         nodes = _spill_numa_nodes()
-        node = nodes[int(getattr(moe, "layer_id", 0)) % len(nodes)]
+        node = nodes[layer_id % len(nodes)]
         if node < 0:
             node = None
-    mms: List = []
-    for attr in _EXPERT_PARAM_ATTRS:
-        p = getattr(moe, attr, None)
-        if p is None or not isinstance(p, torch.nn.Parameter) or p.ndim < 1:
-            continue
-        row_shape = tuple(p.shape[1:])
-        if int(p.shape[0]) == 0:
-            continue
-        n_host = plan.n_spilled
-        numel = n_host * int(p[0].numel())
-        if node is not None and numel > 0:
-            mm = mmap_numa_thp(numel * p.element_size(), node=node)
-            mms.append(mm)
-            host = torch.frombuffer(mm, dtype=p.dtype, count=numel).view(n_host, *row_shape)
-        else:
-            host = torch.empty(n_host, *row_shape, dtype=p.dtype, device="cpu")
-        hosts[attr] = host
+    specs = _spill_row_specs(moe)
+    if node is None:
+        hosts, mms = _alloc_spill_rows(specs, n_rows=plan.n_spilled, node=None)
+    else:
+        hosts, mms, node = _alloc_spill_rows_with_failover(
+            specs, n_rows=plan.n_spilled, preferred=node, layer_id=layer_id
+        )
     moe._dsv41_spill_host = hosts  # type: ignore[attr-defined]
     moe._dsv41_spill_host_ctor_mms = mms  # type: ignore[attr-defined]
     moe._dsv41_spill_numa_node = node  # type: ignore[attr-defined]
     moe._dsv41_expert_spill_plan = plan  # type: ignore[attr-defined]
+
+
+# (param attr, dtype, row shape) of one expert-dim param's host rows.
+_SpillRowSpec = tuple[str, torch.dtype, tuple[int, ...]]
+
+
+def _spill_row_specs(moe: nn.Module) -> List[_SpillRowSpec]:
+    specs = []
+    for attr in _EXPERT_PARAM_ATTRS:
+        p = getattr(moe, attr, None)
+        if p is None or not isinstance(p, torch.nn.Parameter) or p.ndim < 1:
+            continue
+        if int(p.shape[0]) == 0:
+            continue
+        specs.append((attr, p.dtype, tuple(p.shape[1:])))
+    return specs
+
+
+def _alloc_spill_rows(
+    specs: List[_SpillRowSpec],
+    *,
+    n_rows: int,
+    node: Optional[int],
+) -> tuple[Dict[str, torch.Tensor], List]:
+    hosts: Dict[str, torch.Tensor] = {}
+    mms: List = []
+    try:
+        for attr, dtype, row_shape in specs:
+            numel = n_rows * math.prod(row_shape)
+            if node is not None and numel > 0:
+                mms.append(mmap_numa_thp(numel * dtype.itemsize, node=node))
+                hosts[attr] = torch.frombuffer(mms[-1], dtype=dtype, count=numel).view(
+                    n_rows, *row_shape
+                )
+            else:
+                hosts[attr] = torch.empty(n_rows, *row_shape, dtype=dtype, device="cpu")
+    except BaseException:
+        # The traceback keeps this frame alive; unmap the rows placed so far now.
+        hosts.clear()
+        mms.clear()
+        raise
+    return hosts, mms
+
+
+def _alloc_spill_rows_with_failover(
+    specs: List[_SpillRowSpec],
+    *,
+    n_rows: int,
+    preferred: int,
+    layer_id: int,
+) -> tuple[Dict[str, torch.Tensor], List, int]:
+    """Rows of one layer, all on one node: the stripe node if it has room."""
+    nbytes = sum(
+        n_rows * math.prod(shape) * dtype.itemsize for _, dtype, shape in specs
+    )
+    last_err: Optional[EngramNumaError] = None
+    for node in _spill_numa_failover_order(preferred, nbytes=nbytes):
+        try:
+            hosts, mms = _alloc_spill_rows(specs, n_rows=n_rows, node=node)
+        except EngramNumaError as e:
+            last_err = e
+            logger.warning(
+                "DSV4.1 spill rows L%s: placing on node %d failed (%s); trying the next node",
+                layer_id,
+                node,
+                e,
+            )
+            continue
+        if node != preferred:
+            logger.warning(
+                "DSV4.1 spill rows L%s: on node %d instead of stripe node %d",
+                layer_id,
+                node,
+                preferred,
+            )
+        return hosts, mms, node
+    raise EngramNumaError(
+        f"spill rows L{layer_id}: no NUMA node took {nbytes} bytes"
+    ) from last_err
 
 
 @contextmanager
@@ -401,14 +473,28 @@ def _spill_numa_nodes() -> List[int]:
     return [gpu, *sorted(n for n in read_numa_nodes() if n != gpu)]
 
 
-def _spill_numa_failover_order(preferred: int) -> List[int]:
-    """Try the stripe node first, then the other configured sockets."""
-    nodes = _spill_numa_nodes()
+# Arbitrary margin: covers the reclaim watermarks and the other ranks
+# placing the same layer at the same time.
+_SPILL_NODE_HEADROOM_BYTES = 2 * GIB
+
+
+def _spill_numa_failover_order(preferred: int, *, nbytes: int) -> List[int]:
+    """The stripe node first, then the other configured nodes.
+
+    Nodes without ``nbytes`` of free or page-cache memory go last: a bound
+    allocation there reclaims and swaps on that node, and can end in an OOM
+    kill, instead of failing.
+    """
     ordered: List[int] = []
-    for n in [preferred, *nodes]:
+    for n in [preferred, *_spill_numa_nodes()]:
         if n not in ordered:
             ordered.append(n)
-    return ordered
+
+    def lacks_room(n: int) -> bool:
+        node = n if n >= 0 else gpu_numa_node()
+        return node_available_bytes(node) < nbytes + _SPILL_NODE_HEADROOM_BYTES
+
+    return sorted(ordered, key=lacks_room)
 
 
 def _pin_spill_hosts_on_node(
@@ -493,22 +579,23 @@ def pin_spill_host_numa(moe: nn.Module, layer_ordinal: int) -> Optional[int]:
     total = 0
     registered = 0
     node = preferred
-    for i, node in enumerate(_spill_numa_failover_order(int(preferred))):
+    nbytes = sum(t.numel() * t.element_size() for t in hosts.values())
+    for node in _spill_numa_failover_order(int(preferred), nbytes=nbytes):
         try:
             pinned, mms, total, registered = _pin_spill_hosts_on_node(hosts, node)
-            if i > 0:
+            if node != preferred:
                 logger.warning(
-                    "DSV4.1 spill mirror L%s: node %d full, pinned on node %d (UPI)",
+                    "DSV4.1 spill mirror L%s: pinned on node %d instead of node %d",
                     layer_ordinal,
-                    preferred,
                     node,
+                    preferred,
                 )
             last_err = None
             break
         except EngramNumaError as e:
             last_err = e
             logger.warning(
-                "DSV4.1 spill mirror L%s: mbind node %d failed (%s); trying next stripe node",
+                "DSV4.1 spill mirror L%s: placing on node %d failed (%s); trying the next node",
                 layer_ordinal,
                 node,
                 e,
@@ -541,12 +628,17 @@ _COLD_SET_CACHE: Dict[str, Optional[torch.Tensor]] = {}
 
 
 def _load_cold_set_table(path: str) -> Optional[torch.Tensor]:
-    """``cold_ids`` int64 [layers, ep, S], coldest first. Cached per path."""
+    """``cold_ids`` int64 [layers, ep, S], coldest first, from JSON or a torch file. Cached per path."""
     if path in _COLD_SET_CACHE:
         return _COLD_SET_CACHE[path]
     table: Optional[torch.Tensor] = None
     try:
-        obj = torch.load(path, map_location="cpu", weights_only=False)
+        if path.endswith(".json"):
+            # The shipped table is JSON: plain data, nothing to unpickle.
+            with open(path) as f:
+                obj = json.load(f)
+        else:
+            obj = torch.load(path, map_location="cpu", weights_only=False)
         t = obj["cold_ids"] if isinstance(obj, dict) else obj
         table = torch.as_tensor(t, dtype=torch.int64)
         if table.ndim != 3:

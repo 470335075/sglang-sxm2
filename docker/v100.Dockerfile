@@ -212,6 +212,7 @@ COPY scripts/smoke_v100.sh \
      scripts/serve_glm53_flash_nvfp4_v100.sh \
      scripts/serve_qwen38_flash_next_nvfp4_v100.sh \
      scripts/serve_dsv41_v100.sh \
+     scripts/dsv41_flash_cold_set_ep8.json \
      scripts/serve_minimax_h3_v100.sh \
      /opt/sglang/scripts/
 COPY docker/v100-entrypoint.sh /usr/local/bin/v100-entrypoint

@@ -219,3 +219,24 @@ async def prefix_reuse(disaggregation_mode: str, tokenizer_manager: TokenizerMan
 
         async for _ in tokenizer_manager.generate_request(generate_req_input, None):
             pass
+
+
+@warmup("sampling")
+async def sampling_kernels(
+    disaggregation_mode: str, tokenizer_manager: TokenizerManager
+):
+    """Serve one short sampled request before startup completes.
+
+    The first non-greedy request JIT-builds FlashInfer's sampling module
+    (about 90 s on SM70); without this it lands on the first user request.
+    """
+    generate_req_input = GenerateReqInput(
+        input_ids=np.random.randint(1, 1024, size=[16]).tolist(),
+        sampling_params={"max_new_tokens": 4, "temperature": 1.0, "top_p": 0.95},
+    )
+    if disaggregation_mode != "null":
+        generate_req_input.bootstrap_room = 0
+        generate_req_input.bootstrap_host = FAKE_BOOTSTRAP_HOST
+
+    async for _ in tokenizer_manager.generate_request(generate_req_input, None):
+        pass

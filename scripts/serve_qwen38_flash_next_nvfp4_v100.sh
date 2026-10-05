@@ -240,6 +240,8 @@ args=(
   # memory. Without offload it is created on GPU and OOMs at ~31.5 GiB/rank
   # during create_weights.
   --ple-offload-embedding
+  # Builds FlashInfer's sampling kernels before serving (JIT, ~90 s when cold).
+  --warmups sampling
 )
 if [[ "$MODE" == mtp ]]; then
   # Built-in MTP-3/4 loads the MTP module from the same checkpoint.
