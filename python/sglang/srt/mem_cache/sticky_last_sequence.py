@@ -28,6 +28,7 @@ import torch
 
 from sglang.srt.layers.attention.dsv4.sm70_csa2_boundary import (
     BOUNDARY_KEEP,
+    csa2_image_len,
     evict_recent,
 )
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ReqKvInfo
@@ -113,6 +114,21 @@ def _cuts_still_on(
             or tuple(ids[:length]) == previous[:length]
         )
     ]
+
+
+def _imaged_len(origin_len: int, length: int) -> int:
+    """How many of the finished tokens the CSA2 image holds.
+
+    The last token gets its image only from a forward that reads it. The
+    overlap loop runs one more verify step after the stop and writes it;
+    without that loop the image ends one token short. Pinning that token
+    would make the next turn resume past the image, so the pin stops at the
+    image and the next turn reads the token again.
+    """
+    image = csa2_image_len()
+    if image is None or not origin_len <= image < length:
+        return length
+    return image
 
 
 def _is_exact_continuation(new_ids: Sequence[int], last_ids: tuple[int, ...]) -> bool:
@@ -286,6 +302,14 @@ class StickyLastSequenceCache(BasePrefixCache):
         )
         self._trim_overshoot(req, finished_len)
         ids = list(req.origin_input_ids) + list(req.output_ids[:finished_len])
+        imaged = _imaged_len(len(req.origin_input_ids), len(ids))
+        if imaged < len(ids):
+            logger.info(
+                "sticky last-seq pin stops at the CSA2 image: %d of %d tokens",
+                imaged,
+                len(ids),
+            )
+            ids = ids[:imaged]
 
         is_first = self._slot is None
         if is_first:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+from unittest import mock
 
 import torch
 
@@ -206,6 +207,31 @@ class TestStickyLastSequence(CustomTestCase):
         self.assertEqual(result.device_indices.tolist(), list(range(10)))
         self.assertEqual(nxt.kv.req_pool_idx, 0)
         self.assertEqual(result.cache_protected_len, 0)
+
+    def test_pin_stops_at_the_csa2_image(self):
+        # Without the overlap loop the image ends before the last token.
+        cache, inner, allocator, pool = self._make()
+        target = "sglang.srt.mem_cache.sticky_last_sequence.csa2_image_len"
+        with mock.patch(target, return_value=9):
+            _, last = self._pin(cache, origin=list(range(8)), output=[8, 9])
+        self.assertEqual(cache._last_ids, tuple(last[:9]))
+        self.assertEqual(cache._slot.kv.kv_committed_len, 9)
+
+        nxt = _FakeReq(req_pool_idx=None, committed=0, allocated=0, origin=[])
+        result = cache.match_prefix(
+            MatchPrefixParams(key=_key(last + [50, 51]), req=nxt)
+        )
+        self.assertEqual(len(result.device_indices), 9)
+
+    def test_pin_ignores_an_image_outside_the_output(self):
+        # An image past the stop (overlap loop) or before the prompt end
+        # (another request's) keeps the full pin.
+        for image in (12, 5, None):
+            cache, *_ = self._make()
+            target = "sglang.srt.mem_cache.sticky_last_sequence.csa2_image_len"
+            with mock.patch(target, return_value=image):
+                _, last = self._pin(cache, origin=list(range(8)), output=[8, 9])
+            self.assertEqual(cache._last_ids, tuple(last))
 
     def test_shorter_prompt_misses_and_drops(self):
         cache, inner, allocator, pool = self._make()

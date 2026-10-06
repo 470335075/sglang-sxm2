@@ -344,6 +344,7 @@ def load_resident(paired: Sequence[tuple], store, key: str) -> bool:
     store.tip = {}
     store.tip_len = 0
     store.tip_from_extend = False
+    store.trail = []
     _touch(_stems(key)[0])
     logger.info(
         "csa2 session load key=%s len=%d cuts=%s",

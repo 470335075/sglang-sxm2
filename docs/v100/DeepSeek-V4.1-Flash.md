@@ -2,7 +2,7 @@
 
 The most capable model this engine serves, for reasoning and world knowledge. As far as we know, no other engine runs it on V100s for local agentic coding. It is slow; it runs.
 
-Official `deepseek-ai/DeepSeek-V4.1-Flash` on 8× V100-SXM2-32GB. This build has carried a multi-hour Claude Code session on a single conversation. Continuations that match a recorded chunk or request stop are not re-prefilled (a few dozen new tokens is a few seconds). A suffix of several thousand tokens that was never computed runs at about 300 tok/s: each rank holds 30 of its 48 experts on the GPU, and prefill copies the spilled experts a chunk uses from host memory over PCIe, which is most of the prefill time. Expect 9 to 17 minutes from launch to ready (three launches on 2026-10-05: 2× Xeon Gold 6130, 352 GB RAM, checkpoint on a PCIe NVMe SSD; the spread was the SSD's read speed). Set up host memory before the first launch ([below](#host-memory)).
+Official `deepseek-ai/DeepSeek-V4.1-Flash` on 8× V100-SXM2-32GB. This build has carried a multi-hour Claude Code session on a single conversation. Continuations that match a recorded chunk or request stop are not re-prefilled (a few dozen new tokens reach the first token in about 1 s). A suffix of several thousand tokens that was never computed runs at about 300 tok/s: each rank holds 30 of its 48 experts on the GPU, and prefill copies the spilled experts a chunk uses from host memory over PCIe, which is most of the prefill time. Expect 9 to 17 minutes from launch to ready (three launches on 2026-10-05: 2× Xeon Gold 6130, 352 GB RAM, checkpoint on a PCIe NVMe SSD; the spread was the SSD's read speed). Set up host memory before the first launch ([below](#host-memory)).
 
 ## Get the model
 
@@ -112,6 +112,7 @@ python -m sglang.launch_server \
   --sleep-on-idle \
   --speculative-algorithm DSPARK \
   --speculative-draft-model-path "${MODEL_PATH}" \
+  --disable-overlap-schedule \
   --host 0.0.0.0 \
   --port 11435
 ```
@@ -123,8 +124,9 @@ python -m sglang.launch_server \
 | context / max tokens | 262144 | Advertised window. 8k, 32k and 250k prefills are smoked (250k takes about 17 minutes); 512k has not left ~300 MiB for the Engram MXFP8 unpack |
 | `--mem-fraction-static` | 0.87 | 0.99 OOMs the Engram unpack on T=6 verify capture. 0.88 OOMed the same 300 MiB unpack on a 461-token sticky prefill (TP7 had 284 MiB). 0.86 raises: no KV pool after draft weights |
 | expert spill | 13 GiB/rank (landing 36) | Spill 12 left 8k ~8 MiB short of that unpack |
-| prefill landing | on | Prefill copies the spilled experts a chunk uses into the landing slots, with no swap back to host. 8.3k cold prefill 25 s, 300-700-token follow-ups 3-4 s (was 42 s and 5-6 s with the swap). `SGLANG_DSV41_PREFILL_LANDING=0` restores the GPU-slot swap |
+| prefill landing | on | Prefill copies the spilled experts a chunk uses into the landing slots, with no swap back to host. 8.3k cold prefill 25 s (42 s with the swap), 300-700-token follow-ups 2.3-3.3 s to the first token (5-6 s with the swap). `SGLANG_DSV41_PREFILL_LANDING=0` restores the GPU-slot swap |
 | expert cold set | `scripts/dsv41_flash_cold_set_ep8.json` | Picks which 18 of each GPU's 48 experts per layer live in host memory: the least used on a recorded prompt set (file review, coding, agent turns, reasoning). On held-out requests that is 19 expert reads from host per decoded token instead of 91. An empty `SGLANG_DSV41_EXPERT_SPILL_COLD_SET=` keeps the last experts of each GPU on the host instead |
+| overlap scheduler | off (`--disable-overlap-schedule`) | Each DSpark step waits on the host for its accepted length, so overlap hides nothing and runs one extra verify step (~0.55 s) before a request's first token and after its last. Off, follow-up turns reach the first token ~0.55 s sooner and end ~1.2 s sooner, with the same greedy output. A request that ends on its last step's bonus token has no KV for it yet; the prompt cache then stops one token short and the next turn computes that token again (2026-10-06) |
 | `--max-running-requests` | 1 | DSpark would otherwise inflate this |
 | `--sleep-on-idle` | on | Without it the eight idle scheduler loops keep about 6 CPU cores busy |
 | `--chunked-prefill-size` | 2048 | Vestigial SWA floor is sized for this chunk |

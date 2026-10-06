@@ -112,11 +112,12 @@ if [[ "${SGLANG_DSV41_DSPARK}" == "1" ]]; then
   # 0.87 keeps the 256k pool (draft leftover 4.53 GiB; 0.86 raises).
   export SGLANG_DSV41_MEM_FRACTION="${SGLANG_DSV41_MEM_FRACTION:-0.87}"
   SPEC_FLAGS+=(--speculative-algorithm DSPARK --speculative-draft-model-path "${MODEL}")
-  # Keep the overlap scheduler. The sticky pin counts a request's last token,
-  # and only the overlap loop's extra verify step writes that token's KV.
-  # --disable-overlap-schedule saves ~0.55 s at each turn start and end, but
-  # left the CSA2 image one token short of the pin, and the next exact
-  # continuation crashed (2026-10-06).
+  # Overlap off: each DSpark step waits on the host for its accepted length
+  # (CSA2 commit), so the overlap loop hides nothing and runs one extra
+  # verify step (~0.55 s) before a request's first token and after its last.
+  # A request that ends on a bonus token has no KV for it; the sticky pin
+  # stops at the CSA2 image and the next turn reads that token again.
+  SPEC_FLAGS+=(--disable-overlap-schedule)
 else
   export SGLANG_DSV41_SPILL_LANDING="${SGLANG_DSV41_SPILL_LANDING:-6}"
   export SGLANG_DSV41_EXPERT_SPILL_GB="${SGLANG_DSV41_EXPERT_SPILL_GB:-10}"
