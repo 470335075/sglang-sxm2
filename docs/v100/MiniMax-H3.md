@@ -34,7 +34,6 @@ transformer stays on the GPUs. `--warmup-mode off` skips a startup generation.
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export TORCH_CUDA_ARCH_LIST=7.0
-export NCCL_P2P_LEVEL=NVL
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 sglang serve \

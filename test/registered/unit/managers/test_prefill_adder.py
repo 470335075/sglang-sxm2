@@ -1647,7 +1647,9 @@ class TestPrefillAdder(CustomTestCase):
         rem_chunk_tokens: int = 512,
     ) -> PrefillAdder:
         self.mock_tree_cache.sliding_window_size = sliding_window
-        self.mock_token_allocator = self.create_token_allocator(size_swa=size_swa)
+        self.mock_token_allocator = self.create_token_allocator(
+            size_swa=size_swa, swa_available_size=swa_available_size
+        )
         self.mock_token_allocator.create_prefill_budget.side_effect = (
             lambda tree_cache, **kwargs: SWAPrefillBudget(
                 self.mock_token_allocator, tree_cache, **kwargs

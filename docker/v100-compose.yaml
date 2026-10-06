@@ -62,8 +62,8 @@ services:
       FLASH_NEXT_GPUS: ${FLASH_NEXT_GPUS:-0,1,2,3}
       # The host KV tier spills to disk; keep it on the cache volume.
       SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR: /root/.cache/hicache_storage
-      # PCIe cards: NCCL_P2P_LEVEL=PXB and SGLANG_CUSTOM_AR_ALLOW_PCIE=1.
-      NCCL_P2P_LEVEL: ${NCCL_P2P_LEVEL:-NVL}
+      # PCIe cards without NVLink: SGLANG_CUSTOM_AR_ALLOW_PCIE=1.
+      SGLANG_CUSTOM_AR_ALLOW_PCIE: ${SGLANG_CUSTOM_AR_ALLOW_PCIE:-0}
 
   dsv41:
     <<: *v100
@@ -87,7 +87,6 @@ services:
       H3_MODEL: /models/MiniMax-H3
       H3_GPUS: ${H3_GPUS:-0,1,2,3}
       H3_PORT: ${H3_PORT:-30010}
-      NCCL_P2P_LEVEL: ${NCCL_P2P_LEVEL:-NVL}
 
 volumes:
   sglang-sxm2-cache:

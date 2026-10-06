@@ -1,6 +1,7 @@
 """Unit tests for UnifiedRadixCache"""
 
 import atexit
+import functools
 import json
 import shutil
 import sys
@@ -124,6 +125,18 @@ _TREE_CORE_TEST_BACKEND: Optional[str] = "python"
 
 def _selected_tree_core_test_backend() -> str:
     return _TREE_CORE_TEST_BACKEND or envs.SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND.get()
+
+
+@functools.cache
+def _rust_tree_core_unavailable() -> bool:
+    """True where even a plain cache falls back to Python (e.g. torch out of range)."""
+    plain = CacheInitParams(
+        disable=False,
+        req_to_token_pool=None,
+        token_to_kv_pool_allocator=None,
+        page_size=1,
+    )
+    return resolve_tree_core_backend("rust", plain) != "rust"
 
 
 def _session_radix_cache_test_values() -> tuple[bool, ...]:
@@ -762,6 +775,9 @@ class TestUnifiedRadixAllocationEvictionRealComponents(CustomTestCase):
         for session in _session_radix_cache_test_values():
             for pinned in (False, True):
                 with self.subTest(session=session, pinned=pinned):
+                    # The barrier is Rust-only; session caches use Python by design.
+                    if not session and _rust_tree_core_unavailable():
+                        self.skipTest("the Rust TreeCore is unavailable here")
                     # This exercises the Rust backup barrier, independently of
                     # the shared suite's default backend.
                     with mock.patch(f"{__name__}._TREE_CORE_TEST_BACKEND", "rust"):
@@ -6399,6 +6415,11 @@ class UnifiedRadixCacheSuite:
     def test_hicache_internal_mamba_backup_waits_for_pending_swa(self):
         if not (self.cfg.has_swa and self.cfg.has_mamba):
             self.skipTest("requires Full, SWA and Mamba components")
+        if (
+            _selected_tree_core_test_backend() == "rust"
+            and _rust_tree_core_unavailable()
+        ):
+            self.skipTest("the Rust TreeCore is unavailable here")
         page = self.cfg.page_size
         cache, allocator, req_pool = build_fixture(
             replace(self.cfg, sliding_window_size=3 * page)
@@ -6475,6 +6496,11 @@ class UnifiedRadixCacheSuite:
         stays servable instead of losing a window of matchable prefix."""
         if not self.cfg.has_swa:
             self.skipTest("requires SWA component")
+        if (
+            _selected_tree_core_test_backend() == "rust"
+            and _rust_tree_core_unavailable()
+        ):
+            self.skipTest("the Rust TreeCore is unavailable here")
         cache, req_to_token_pool, seq_a, seq_b = self._build_internal_swa_fixture(
             "write_back"
         )

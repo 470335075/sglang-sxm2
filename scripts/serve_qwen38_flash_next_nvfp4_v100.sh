@@ -57,11 +57,11 @@ done
 export TORCH_CUDA_ARCH_LIST=7.0
 # V100 runtime env (same set as the README's Flash-Next commands)
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
+# NCCL_P2P_LEVEL stays unset: NCCL picks NVLink where it exists and PCIe P2P
+# behind a PCIe switch; forcing NVL routes PCIe-only cards through host memory.
 export SGLANG_CUSTOM_ALLREDUCE_ALGO=1stage
-# 4x V100 PCIe-only (no NVLink, P2P via one PLX): NCCL_P2P_LEVEL=PXB and
-# SGLANG_CUSTOM_AR_ALLOW_PCIE=1 (default off; one-shot push, 128 KiB cap).
-# Do not set that on this 8x V100 hybrid NVLink mesh.
+# 4x V100 PCIe-only (no NVLink, P2P via one PLX): SGLANG_CUSTOM_AR_ALLOW_PCIE=1
+# (default off; one-shot push, 128 KiB cap). Do not set it on an NVLink mesh.
 export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_MAMBA_SSM_DTYPE=float16
 export SGLANG_SM70_FORCE_FP16=1

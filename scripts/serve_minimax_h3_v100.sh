@@ -40,7 +40,8 @@ for _v in 14 13 12; do
 done
 export TORCH_CUDA_ARCH_LIST=7.0
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
+# NCCL_P2P_LEVEL stays unset: NCCL picks NVLink where it exists and PCIe P2P
+# behind a PCIe switch; forcing NVL routes PCIe-only cards through host memory.
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$REPO"

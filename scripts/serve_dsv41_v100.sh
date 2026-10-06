@@ -112,6 +112,11 @@ if [[ "${SGLANG_DSV41_DSPARK}" == "1" ]]; then
   # 0.87 keeps the 256k pool (draft leftover 4.53 GiB; 0.86 raises).
   export SGLANG_DSV41_MEM_FRACTION="${SGLANG_DSV41_MEM_FRACTION:-0.87}"
   SPEC_FLAGS+=(--speculative-algorithm DSPARK --speculative-draft-model-path "${MODEL}")
+  # Keep the overlap scheduler. The sticky pin counts a request's last token,
+  # and only the overlap loop's extra verify step writes that token's KV.
+  # --disable-overlap-schedule saves ~0.55 s at each turn start and end, but
+  # left the CSA2 image one token short of the pin, and the next exact
+  # continuation crashed (2026-10-06).
 else
   export SGLANG_DSV41_SPILL_LANDING="${SGLANG_DSV41_SPILL_LANDING:-6}"
   export SGLANG_DSV41_EXPERT_SPILL_GB="${SGLANG_DSV41_EXPERT_SPILL_GB:-10}"

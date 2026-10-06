@@ -335,7 +335,7 @@ volume, about 10 minutes for GLM; later launches start from the cache.
 The serve scripts' variables pass through from the shell, for example
 `SGLANG_V100_HOST=127.0.0.1` to keep the server off the network, or
 `SGLANG_V100_PORT`, `GLM53_GPUS`, `FLASH_NEXT_GPUS`, `H3_GPUS`. On PCIe cards
-set `NCCL_P2P_LEVEL=PXB` (see the model pages).
+without NVLink set `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` for Qwen (see its page).
 
 The entrypoint, `docker/v100-entrypoint.sh`, takes the model as its first
 argument and runs the kernel check from step 9 before each model unless

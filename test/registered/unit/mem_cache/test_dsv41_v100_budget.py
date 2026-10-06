@@ -16,7 +16,6 @@ from sglang.srt.layers.moe.dsv41_expert_spill import (
     v1_spill_plan,
 )
 from sglang.srt.mem_cache.dsv41_host_placement import (
-    DOCUMENTED_NODE_TOTAL_GIB,
     GIB,
     PRE_H1_NODE_TOTAL_GIB,
     EngramNumaError,

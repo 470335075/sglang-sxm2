@@ -16,11 +16,29 @@ from sglang.srt.mem_cache.base_prefix_cache import InsertParams, MatchPrefixPara
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
-from sglang.srt.mem_cache.unified_cache.tree_core_registry import create_tree_core
+from sglang.srt.mem_cache.unified_cache.tree_core_registry import (
+    create_tree_core,
+    resolve_tree_core_backend,
+)
 from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=17, suite="base-a-test-cpu")
+
+# Skip where production would also fall back to Python (e.g. torch outside range).
+if (
+    resolve_tree_core_backend(
+        "rust",
+        CacheInitParams(
+            disable=False,
+            req_to_token_pool=None,
+            token_to_kv_pool_allocator=None,
+            page_size=1,
+        ),
+    )
+    != "rust"
+):
+    pytest.skip("the Rust TreeCore is unavailable here", allow_module_level=True)
 
 
 def _tree_core():

@@ -87,7 +87,6 @@ Expanded (what that script runs with MTP). The env block is not implied by the C
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export TORCH_CUDA_ARCH_LIST=7.0
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export NCCL_P2P_LEVEL=NVL
 export NCCL_ALGO=allreduce:tree
 export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_SM70_FORCE_FP16=1
@@ -168,4 +167,4 @@ Without MTP (`GLM53_MTP_STEPS=0` in the wrapper): drop the five `--speculative-*
 
 ## PCIe V100s
 
-The recipe is measured on SXM2. The two-level all-reduce (`SGLANG_DSV41_HIER_AR*`) assumes two NVLink quads joined by bridges; on PCIe cards set `SGLANG_DSV41_HIER_AR=0` and `NCCL_P2P_LEVEL=PXB` before the script. Untested on an 8-card PCIe box; expect slower decode.
+The recipe is measured on SXM2. The two-level all-reduce (`SGLANG_DSV41_HIER_AR*`) assumes two NVLink quads joined by bridges; on PCIe cards set `SGLANG_DSV41_HIER_AR=0` before the script. Untested on an 8-card PCIe box; expect slower decode.

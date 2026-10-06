@@ -33,7 +33,8 @@ export CC=/usr/bin/gcc-14 CXX=/usr/bin/g++-14 CUDAHOSTCXX=/usr/bin/g++-14
 export NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-14"
 export TORCH_CUDA_ARCH_LIST=7.0
 export FLASHINFER_DISABLE_VERSION_CHECK=1
-export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-NVL}"
+# NCCL_P2P_LEVEL stays unset: NCCL picks NVLink where it exists and PCIe P2P
+# behind a PCIe switch; forcing NVL routes PCIe-only cards through host memory.
 export NCCL_ALGO="${NCCL_ALGO:-allreduce:tree}"
 export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_SM70_FORCE_FP16=1

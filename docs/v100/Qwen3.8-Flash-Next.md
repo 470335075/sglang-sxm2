@@ -89,7 +89,6 @@ Expanded (what that script runs for `mtp`). The env block is not implied by the 
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
-export NCCL_P2P_LEVEL=NVL
 export SGLANG_CUSTOM_ALLREDUCE_ALGO=1stage
 export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_MAMBA_SSM_DTYPE=float16
@@ -165,7 +164,7 @@ python -m sglang.launch_server \
 
 ## PCIe V100s
 
-Four PCIe-only V100s with P2P (no NVLink): export `NCCL_P2P_LEVEL=PXB` and `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` before the script. Leave both unset on an NVLink mesh.
+Four PCIe-only V100s with P2P (no NVLink): export `SGLANG_CUSTOM_AR_ALLOW_PCIE=1` before the script. NCCL already uses PCIe P2P between cards behind one switch, so leave `NCCL_P2P_LEVEL` unset; `NVL` would send its traffic through host memory. Leave both unset on an NVLink mesh.
 
 ## Limitations
 
