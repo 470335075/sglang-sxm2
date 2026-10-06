@@ -78,6 +78,13 @@ export PYTHONPATH="$REPO/python"
 # hicache_storage.py defaults to /tmp/hicache. On this box /tmp is tmpfs, so an
 # unset dir is a RAM allocation. Keep the file tier on disk.
 export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="${SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR:-$HOME/hicache_storage}"
+# Without the metadata cache, every disk-tier lookup lists the whole storage
+# directory, so requests wait longer as it fills: a 600-token tool result
+# waited 92-119 ms before prefill at 50-68k files, and 20 ms with the cache.
+# The cache only remembers files that exist, and eviction drops them from it.
+# A file removed behind its back ends that prefetch early (the rest is
+# recomputed); it never yields wrong data.
+export SGLANG_HICACHE_FILE_BACKEND_ENABLE_METADATA_CACHE="${SGLANG_HICACHE_FILE_BACKEND_ENABLE_METADATA_CACHE:-1}"
 
 # Docker-v2 tested sizing (README: 4 live requests, full 262K context)
 args=(
@@ -215,6 +222,12 @@ args=(
   # memory for a shape that can no longer occur.
   --cuda-graph-max-bs-decode 3
   --cuda-graph-bs-decode 1 2 3
+  # Upstream turns breakable prefill graphs on for this model (#41729). Its
+  # capture (target 3.8 GB, then the draft) does not fit next to the KV pool
+  # that --mem-fraction-static above was tuned for: the draft capture ran out
+  # of memory at 4096 tokens. Off, as before the 10-05 sync, until the TTFT
+  # gain is measured against a smaller pool.
+  --disable-prefill-cuda-graph
   --mamba-radix-cache-strategy extra_buffer
   --mamba-full-memory-ratio 0.2
   # Report prefix-cache hits as usage.prompt_tokens_details.cached_tokens

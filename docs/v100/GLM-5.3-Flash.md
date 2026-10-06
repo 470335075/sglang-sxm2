@@ -40,21 +40,21 @@ The model has three reasoning efforts: Low, High and Max. The server reads `reas
 
 ## Measured performance
 
-2026-10-02, the reference recipe below: TP=8, MTP 3 steps / 4 draft tokens, `--max-running-requests 1`, temperature 0. KV pool 242,880 tokens, context 240,640.
+The reference recipe below: TP=8, MTP 3 steps / 4 draft tokens, `--max-running-requests 1`, temperature 0. KV pool 242,880 tokens, context 240,640.
 
-**Decode.** Six chat prompts, 512 tokens each, streamed from `/generate`; tok/s excludes TTFT. Accept length is tokens per target forward.
+**Decode** (2026-10-06). Six chat prompts, 512 tokens each, streamed from `/generate`; tok/s excludes TTFT. Accept length is tokens per target forward.
 
 | prompt | tok/s | accept length |
 |---|---:|---:|
-| code | 169.9 | 2.89 |
-| refactor | 175.4 | 2.99 |
-| explain | 147.9 | 2.52 |
-| math | 191.9 | 3.26 |
-| agent step | 172.8 | 2.98 |
-| German prose | 157.4 | 2.89 |
-| **all six** | **168.0** | |
+| code | 174.3 | 2.89 |
+| refactor | 180.0 | 2.99 |
+| explain | 152.3 | 2.52 |
+| math | 196.6 | 3.26 |
+| agent step | 179.0 | 2.98 |
+| German prose | 175.3 | 2.89 |
+| **all six** | **175.2** | |
 
-**Agent session.** Through `/v1/chat/completions` with a `bash` tool: source files as the first user message, then three turns that each append an assistant tool call and its result (~500–700 new tokens). TTFT includes rendering and tokenizing the whole chat on the server. The first request with a new set of tools also compiles its tool-call grammar, about 7 s once per tool set; the rows below were measured after that.
+**Agent session** (2026-10-02). Through `/v1/chat/completions` with a `bash` tool: source files as the first user message, then three turns that each append an assistant tool call and its result (~500–700 new tokens). TTFT includes rendering and tokenizing the whole chat on the server. The first request with a new set of tools also compiles its tool-call grammar, about 7 s once per tool set; the rows below were measured after that.
 
 | context | cold first turn | tool turns 1 / 2 / 3 |
 |---|---:|---:|
@@ -62,7 +62,7 @@ The model has three reasoning efforts: Low, High and Max. The server reads `reas
 | 128,188 tokens | 68.1 s | 701 / 619 / 550 ms |
 | 190,188 tokens | 104.7 s | 768 / 702 / 602 ms |
 
-**Main session plus subagents.** A 190k main conversation, then two fresh ~20k subagent conversations of three turns each, with a main turn after each subagent. The main turns stay cached:
+**Main session plus subagents** (2026-10-02). A 190k main conversation, then two fresh ~20k subagent conversations of three turns each, with a main turn after each subagent. The main turns stay cached:
 
 | turn | TTFT |
 |---|---:|

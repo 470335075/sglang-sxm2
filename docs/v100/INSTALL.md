@@ -128,7 +128,7 @@ pip install --no-deps --no-build-isolation python/sglang/kernels/aot
 Two things to know:
 
 - **`--no-build-isolation` is required, not an optimisation.** The AOT
-  `pyproject.toml` declares `torch==2.13.0` as a *build* requirement. An
+  `pyproject.toml` declares `torch==2.14.1` as a *build* requirement. An
   isolated build would fetch that and produce an extension whose ABI does not
   match the runtime's torch 2.9.1.
 - **`SGL_KERNEL_V100_ONLY=ON` matters a lot.** With it, the build is 38 objects

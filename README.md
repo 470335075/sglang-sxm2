@@ -41,7 +41,7 @@ In an agent loop most turns append a tool result of a few hundred tokens to a lo
 | 128k tokens | 68 s | 0.55–0.70 s |
 | 190k tokens | 105 s | 0.60–0.77 s |
 
-- **Decode:** ~168 tok/s (148–192 across six prompt types), with MTP accepting ~2.9 tokens per step.
+- **Decode:** ~175 tok/s (152–197 across six prompt types), with MTP accepting ~2.9 tokens per step.
 - **Subagents don't evict the main session.** Two conversations stay cached side by side. With a 190k main session, a fresh 20k subagent costs ~10 s once, then ~0.5 s per turn, and the next main turn still answers in ~0.7 s.
 
 ### Qwen3.8-Flash-Next: fast tool-call turns on four cards

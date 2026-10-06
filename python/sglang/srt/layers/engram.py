@@ -11,7 +11,6 @@ import ctypes
 import glob
 import logging
 import mmap
-import errno
 import os
 import re
 import time
@@ -33,7 +32,7 @@ from sglang.kernels.ops.embeddings.engram_hash import (
     engram_hash_ids_and_commit,
 )
 from sglang.srt.distributed import tensor_model_parallel_all_reduce
-from sglang.srt.distributed.parallel_state import get_tp_group
+from sglang.srt.distributed.parallel_state import get_tp_group, inplace_all_reduce
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.dsv4.torch_quant import FP8_BLOCK_SIZE
 from sglang.srt.layers.dp_attention import (
@@ -66,7 +65,7 @@ from sglang.srt.mem_cache.dsv41_host_placement import (
     read_numa_nodes,
     smaps_huge_kb,
 )
-from sglang.srt.utils import add_prefix
+from sglang.srt.utils import add_prefix, is_hip
 from sglang.srt.utils.hf_transformers.tokenizer import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -91,6 +90,11 @@ def engram_shard_rows(num_rows: int, tp_rank: int, tp_size: int) -> tuple[int, i
     return start, end
 
 
+_MILLER_RABIN_WITNESSES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+
+_is_hip = is_hip()
+
+
 def engram_lookup_dtype(device: torch.device | str | int | None = None) -> torch.dtype:
     """Dequant/gate activation dtype: fp16 on SM70 (no BF16), bf16 on Hopper+."""
     if device is not None:
@@ -111,11 +115,32 @@ def engram_lookup_dtype(device: torch.device | str | int | None = None) -> torch
     return torch.bfloat16
 
 
-def _find_next_prime(start: int, seen_primes: set[int]) -> int:
-    from sympy import isprime
+def _is_prime(n: int) -> bool:
+    """Deterministic Miller-Rabin; exact for n < 3.3e24 with these witnesses."""
+    if n < 2:
+        return False
+    for p in _MILLER_RABIN_WITNESSES:
+        if n % p == 0:
+            return n == p
+    d, r = n - 1, 0
+    while d % 2 == 0:
+        d, r = d // 2, r + 1
+    for a in _MILLER_RABIN_WITNESSES:
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for _ in range(r - 1):
+            x = x * x % n
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
 
+
+def _find_next_prime(start: int, seen_primes: set[int]) -> int:
     candidate = start + 1
-    while not isprime(candidate) or candidate in seen_primes:
+    while not _is_prime(candidate) or candidate in seen_primes:
         candidate += 1
     return candidate
 
@@ -367,7 +392,13 @@ class EngramHasher(nn.Module):
             )
             lens = forward_batch.extend_seq_lens.to(torch.int64)
             starts = forward_batch.extend_start_loc.to(torch.int64)
-            row = torch.repeat_interleave(torch.arange(bs, device=device), lens)
+            lens_cpu = forward_batch.extend_seq_lens_cpu
+            row = torch.repeat_interleave(
+                torch.arange(bs, device=device),
+                lens,
+                # The host total skips the device sum's sync.
+                output_size=sum(lens_cpu) if lens_cpu is not None else None,
+            )
             num_real = row.shape[0]
             kmode = MODE_EXTEND
             if forward_batch.engram_history is not None:
@@ -1036,8 +1067,17 @@ class EngramEmbedding(nn.Module):
             return self._empty(indices)
         values = self._owned_rows(indices)
         if self.tp_size > 1:
-            values = tensor_model_parallel_all_reduce(values)
+            values = self._reduce_owned_rows(values)
         return values
+
+    def _reduce_owned_rows(self, values: torch.Tensor) -> torch.Tensor:
+        if _is_hip and values.is_cuda:
+            # Integer addition preserves all BF16 bits because exactly one shard owns each row.
+            inplace_all_reduce(
+                values.view(torch.int32), group_name=get_parallel().tp_group.unique_name
+            )
+            return values
+        return tensor_model_parallel_all_reduce(values)
 
     def _empty(self, indices: torch.Tensor) -> torch.Tensor:
         return torch.empty(
@@ -1108,9 +1148,14 @@ class EngramEmbedding(nn.Module):
             and self.tp_size == get_parallel().attn_dp_size
             and rows == self.tp_size * local.shape[0]
         ) or is_dp_gatherv_active():
-            dp_reduce_scatter_tensor(local, values)
+            if _is_hip and values.is_cuda:
+                dp_reduce_scatter_tensor(
+                    local.view(torch.int32), values.view(torch.int32)
+                )
+            else:
+                dp_reduce_scatter_tensor(local, values)
         else:
-            dp_scatter(local, tensor_model_parallel_all_reduce(values), forward_batch)
+            dp_scatter(local, self._reduce_owned_rows(values), forward_batch)
         return local.view(*indices.shape, self.dim)
 
 

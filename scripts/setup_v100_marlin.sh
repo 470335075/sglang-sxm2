@@ -64,16 +64,52 @@ else
   fi
 fi
 
+# Tree of MARLIN_V100_REF with the first $1 SM70 patches applied, built in a
+# scratch index so the checkout is not touched.
+patched_tree() {
+  local index patch status=0
+  index="$(mktemp)"
+  GIT_INDEX_FILE="$index" git -C "$REPO" read-tree "$MARLIN_V100_REF" || status=1
+  for patch in "${SM70_PATCHES[@]:0:$1}"; do
+    (( status )) || GIT_INDEX_FILE="$index" git -C "$REPO" apply --cached "$patch" || status=1
+  done
+  (( status )) || GIT_INDEX_FILE="$index" git -C "$REPO" write-tree || status=1
+  rm -f "$index"
+  return "$status"
+}
+
+# Do the checkout's copies of the patched files equal those in tree $1?
+# A file missing on both sides counts as equal.
+checkout_matches() {
+  local path want have
+  for path in "${PATCHED_PATHS[@]}"; do
+    want="$(git -C "$REPO" rev-parse -q --verify "$1:$path" || true)"
+    have=""
+    if [[ -f "$REPO/$path" ]]; then have="$(git -C "$REPO" hash-object -- "$path")"; fi
+    [[ "$want" == "$have" ]] || return 1
+  done
+}
+
 for SM70_PATCH in "${SM70_PATCHES[@]}"; do
   [[ -f "$SM70_PATCH" ]] || die "missing SM70 compatibility patch: $SM70_PATCH"
-  if git -C "$REPO" apply --reverse --check "$SM70_PATCH" >/dev/null 2>&1; then
-    log "already applied: $(basename "$SM70_PATCH")"
-  elif git -C "$REPO" apply --check "$SM70_PATCH"; then
-    git -C "$REPO" apply "$SM70_PATCH"
-    log "applied: $(basename "$SM70_PATCH")"
-  else
-    die "SM70 compatibility patch does not apply cleanly: $SM70_PATCH"
-  fi
+done
+# The patches stack (later ones edit lines that earlier ones add), so no single
+# patch can be checked on its own. Find how many the checkout already carries.
+mapfile -t PATCHED_PATHS < <(git -C "$REPO" apply --numstat "${SM70_PATCHES[@]}" | cut -f3 | sort -u)
+APPLIED=""
+for (( n = ${#SM70_PATCHES[@]}; n >= 0; n-- )); do
+  tree="$(patched_tree "$n")" \
+    || die "SM70 compatibility patches do not apply cleanly to $MARLIN_V100_REF"
+  if checkout_matches "$tree"; then APPLIED="$n"; break; fi
+done
+[[ -n "$APPLIED" ]] \
+  || die "$REPO has local changes in the patched files; move it aside or set MARLIN_V100_REPO."
+for SM70_PATCH in "${SM70_PATCHES[@]:0:$APPLIED}"; do
+  log "already applied: $(basename "$SM70_PATCH")"
+done
+for SM70_PATCH in "${SM70_PATCHES[@]:$APPLIED}"; do
+  git -C "$REPO" apply "$SM70_PATCH"
+  log "applied: $(basename "$SM70_PATCH")"
 done
 
 # --- toolchain: CUDA, host compiler, CUTLASS -----------------------------------

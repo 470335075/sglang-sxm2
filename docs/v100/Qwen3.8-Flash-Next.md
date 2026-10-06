@@ -96,9 +96,11 @@ export SGLANG_MAMBA_SSM_DTYPE=float16
 export SGLANG_SM70_FORCE_FP16=1
 export SGLANG_SM70_DENSE_GEMV=1
 export SGLANG_SM70_QWEN_FUSIONS=1
+export SGLANG_SM70_QSA_DENSE_PREFILL_MAX_TOKENS=8192
 export SGLANG_NUMA_BIND_V2=0
 export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=0
 export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR=$HOME/hicache_storage
+export SGLANG_HICACHE_FILE_BACKEND_ENABLE_METADATA_CACHE=1
 
 python -m sglang.launch_server \
   --model-path "${FLASH_NEXT_MODEL}" \
@@ -127,6 +129,7 @@ python -m sglang.launch_server \
   --sleep-on-idle \
   --cuda-graph-max-bs-decode 3 \
   --cuda-graph-bs-decode 1 2 3 \
+  --disable-prefill-cuda-graph \
   --mamba-radix-cache-strategy extra_buffer \
   --mamba-full-memory-ratio 0.2 \
   --enable-cache-report \
@@ -150,8 +153,10 @@ python -m sglang.launch_server \
 | `--max-running-requests` | 3 | Aggregate decode peaks here. A fourth stream adds no throughput and stretches TTFT. CUDA graphs are captured for batch 1–3 only |
 | prefill chunk | 4096 | An 8k GDN chunk OOMed in the headroom left after the KV pool. Long prompts still run, in 4k chunks |
 | `--hicache-size` | 8 per rank | Host KV and host Mamba, so total is `N × 2 × 4` ranks = 64 GB. N=16 left the box near thrashing. `page_first` is required for the Mamba host pool |
+| disk-tier metadata cache | on | Without it every disk-tier lookup lists the whole storage directory, so requests wait longer as it fills: a 600-token tool result waited 92–119 ms before prefill at 50–68k files, 20 ms with the cache |
 | write policy | `write_back` | `write_through` saturated the disk and made prefix readback collapse. Disk writes happen on eviction and shutdown |
 | `--ple-offload-embedding` | on | The 51 GB n-gram table stays in host RAM. On GPU it OOMs at load |
+| `--disable-prefill-cuda-graph` | on | Upstream turns breakable prefill graphs on for this model. Their capture does not fit next to the KV pool sized above (the draft's capture ran out of memory) |
 | `--sleep-on-idle` | on | Without it each rank busy-spins a core while idle |
 | `--warmups sampling` | on | Builds FlashInfer's sampling kernels at startup. Otherwise the first sampled request waits for the build (about 90 s when the cache is cold) |
 | `--enable-cache-report` | on | Surfaces prefix-cache hits to Claude Code. The cache already hits without the flag; the flag only reports them |
