@@ -897,16 +897,6 @@ class DSparkWorkerV2(BaseSpecWorker):
         bs = len(batch.seq_lens)
         device = self.device
         prefix_lens = batch.seq_lens
-        # Without the overlap scheduler, batch.seq_lens is the verify
-        # executor's new_seq_lens buffer, which this step's accept overwrites
-        # with the post-verify lengths. The CSA2 cap and snapshot run after
-        # the accept and need the lengths this step started from.
-        csa2_prefix_lens = (
-            prefix_lens.clone()
-            if getattr(self.target_worker.model_runner.attn_backend, "_sm70_csa2", None)
-            is not None
-            else prefix_lens
-        )
 
         self._observers.begin_step()
 
@@ -1065,9 +1055,7 @@ class DSparkWorkerV2(BaseSpecWorker):
         # Target verify scored a scratch CSA2 window. Publish only the
         # accepted inputs that fit the scheduler pin; a longer accept is
         # dropped by finished_len and must not stay in the image.
-        csa2_commit = self._csa2_capped_commit(
-            batch, csa2_prefix_lens, accept.commit_lens
-        )
+        csa2_commit = self._csa2_capped_commit(batch, prefix_lens, accept.commit_lens)
         self._commit_sm70_csa2_verify(csa2_commit)
         self.model_runner.ngram_embedding_manager.update_after_verify(
             verify_ids_2d=verify_ids_2d,
@@ -1126,9 +1114,9 @@ class DSparkWorkerV2(BaseSpecWorker):
         if getattr(self.target_worker.model_runner.attn_backend, "_sm70_csa2", None) is not None:
             self._csa2_finish(
                 batch,
-                self._csa2_snap_len(batch, csa2_prefix_lens, csa2_commit),
+                self._csa2_snap_len(batch, prefix_lens, csa2_commit),
                 from_extend=False,
-                start=self._seq0(csa2_prefix_lens),
+                start=self._seq0(prefix_lens),
             )
 
         self._observers.observe_verify_step(

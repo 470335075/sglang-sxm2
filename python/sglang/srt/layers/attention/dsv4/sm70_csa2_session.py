@@ -8,6 +8,7 @@ whole conversations. This does not share rows across branches.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
@@ -263,6 +264,9 @@ def save_resident(paired: Sequence[tuple], store, key: str) -> None:
     tmp = Path(str(blob) + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, blob)
+    # Workaround: torch.save (2.9.1) leaves its pickler class in a reference
+    # cycle holding every saved storage; drop once torch.save frees them itself.
+    gc.collect()
     logger.info(
         "csa2 session spill key=%s len=%d cuts=%s",
         key[:12],

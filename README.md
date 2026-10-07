@@ -162,7 +162,7 @@ These models reason before they answer. An empty `content` with a large `complet
 ## Limitations
 
 - **One agent session per server** for GLM and DeepSeek (`--max-running-requests 1`). Further requests queue. Qwen takes up to three streams.
-- **DeepSeek-V4.1-Flash keeps one conversation resident.** A second conversation prefills from scratch, and a long uncached suffix runs at about 300 tok/s.
+- **DeepSeek-V4.1-Flash keeps one conversation resident.** A new conversation prefills from scratch. The last four are kept on disk, so returning to one of them loads it back instead of prefilling it again. A long uncached suffix runs at about 300 tok/s.
 - **Not soaked for days.** Qwen ran an hour of mixed load tests and DeepSeek a multi-hour Claude Code session. GLM is checked with benchmarks and GSM8K, with no multi-hour soak yet.
 - **Volta has no bf16 and no FP4/FP8 hardware.** Everything runs as fp16 with weight-only 4/8-bit kernels, so numerics differ slightly from a Hopper run of the same checkpoint.
 
@@ -182,6 +182,7 @@ Incorporates work from:
 - **[1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM)**: the vLLM fork for V100 whose TurboMind sm70 block-FP8 and FP16 MoE backend the build compiles.
 - **[Horacio Vico](https://github.com/hvico)** ([hvico/sglang-V100](https://github.com/hvico/sglang-V100)): the opt-in custom all-reduce over PCIe P2P for GPUs without NVLink (`SGLANG_CUSTOM_AR_ALLOW_PCIE`).
 - **[ltarcher](https://github.com/ltarcher)** ([ltarcher/sglang-v100-qwen3.8-flash-next](https://github.com/ltarcher/sglang-v100-qwen3.8-flash-next)): the import guards that treat an installed but unloadable DeepGEMM wheel as missing, and the measurement showing that `NCCL_P2P_LEVEL=NVL` slows PCIe-only cards, after which the scripts leave that choice to NCCL.
+- **[Divy Vasal](https://github.com/divyvasal)** ([sgl-project/sglang#42812](https://github.com/sgl-project/sglang/pull/42812)): DSpark's accept step returns copies instead of views of buffers that the next verify step overwrites, so tensor-parallel ranks cannot commit different token counts under the overlap scheduler.
 
 Volta kernels by: [lmdeploy / TurboMind](https://github.com/InternLM/lmdeploy), [marlin_v100](https://github.com/zhinianqin/marlin_v100), [flash-attention-v100](https://github.com/ai-bond/flash-attention-v100), [v100-skinny](https://github.com/dnv2003/v100-skinny) (QPN8 FP8 decode GEMV), [CUTLASS](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer) and [TileLang](https://github.com/tile-ai/tilelang).
 

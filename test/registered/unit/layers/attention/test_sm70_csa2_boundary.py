@@ -261,6 +261,46 @@ class TestCsa2Boundary(CustomTestCase):
             envs.SGLANG_DSV41_CSA2_SESSION_KEEP.clear()
             reset_handoff()
 
+    def test_spill_frees_its_host_copy(self):
+        """A spilled image's host copy must not outlive the spill.
+
+        Left to the automatic GC, it can stay resident for hours behind the
+        engine's frozen startup objects.
+        """
+        import gc
+        import tempfile
+
+        from sglang.srt.environ import envs
+        from sglang.srt.layers.attention.dsv4.sm70_csa2_session import (
+            request_spill,
+            reset_handoff,
+            session_key,
+        )
+
+        state = _State()
+        state.kv_rows = {2: torch.arange(8, dtype=torch.uint8)}
+        target = _Backend(state)
+        backends = [target]
+        csa2_finish_forward(backends, 4, from_extend=True)
+        csa2_prepare_decode(backends)
+        envs.SGLANG_DSV41_CSA2_SESSION_DIR.set(tempfile.mkdtemp())
+        gc.collect()
+        gc.disable()
+        try:
+            reset_handoff()
+            request_spill(session_key([1, 2, 3, 4], None, None))
+            csa2_prepare_extend(backends, 0)
+            gc.set_debug(gc.DEBUG_SAVEALL)
+            gc.collect()
+            leaked = [o for o in gc.garbage if isinstance(o, torch.UntypedStorage)]
+            self.assertEqual(leaked, [])
+        finally:
+            gc.set_debug(0)
+            gc.garbage.clear()
+            gc.enable()
+            envs.SGLANG_DSV41_CSA2_SESSION_DIR.clear()
+            reset_handoff()
+
     def test_spill_files_verify_tip_under_the_pin(self):
         import tempfile
 

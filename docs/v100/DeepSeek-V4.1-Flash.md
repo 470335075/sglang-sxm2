@@ -120,7 +120,8 @@ python -m sglang.launch_server \
 | knob | ship value | why |
 |---|---|---|
 | DSpark | on (`γ=5` from the checkpoint) | Best measured TG on this box. `SGLANG_DSV41_DSPARK=0` is greedy Tree |
-| sticky last-seq | on | One resident conversation. Exact continuation, or a shorter prefix saved at a chunk or request stop. Anything else, including a second conversation, drops the pin and prefills from 0. Radix stays off (a radix hit desyncs CSA2 pending state) |
+| sticky last-seq | on | One resident conversation. Exact continuation, or a shorter prefix saved at a chunk or request stop. Anything else drops the pin and prefills from 0, unless it continues a stored conversation (next row). Radix stays off (a radix hit desyncs CSA2 pending state) |
+| conversation store | on, last 4 kept | When a request starts a different conversation, the resident one's sparse-attention state is written to disk (`SGLANG_DSV41_CSA2_SESSION_DIR`, `SGLANG_DSV41_CSA2_SESSION_KEEP`). A later request that continues a stored conversation from a recorded stop loads it back instead of prefilling from 0. Switching away and back, a 300-token continuation of a 3k-token conversation reached its first token in 3.1 s, against 9.5 s to prefill the 3k tokens cold (2026-10-07) |
 | context / max tokens | 262144 | Advertised window. 8k, 32k and 250k prefills are smoked (250k takes about 17 minutes); 512k has not left ~300 MiB for the Engram MXFP8 unpack |
 | `--mem-fraction-static` | 0.87 | 0.99 OOMs the Engram unpack on T=6 verify capture. 0.88 OOMed the same 300 MiB unpack on a 461-token sticky prefill (TP7 had 284 MiB). 0.86 raises: no KV pool after draft weights |
 | expert spill | 13 GiB/rank (landing 36) | Spill 12 left 8k ~8 MiB short of that unpack |
@@ -135,7 +136,7 @@ Leave `--speculative-dspark-block-size` at the checkpoint default. Checkpoint we
 
 ## Limitations
 
-- One conversation. A second session prefills from zero, and the resident image does not survive a restart.
+- One conversation on the GPU. A new conversation prefills from zero; continuing one of the last four stored conversations loads it from disk (conversation store above). The resident image does not survive a restart.
 - A long suffix that was never computed runs at about 300 tok/s (each prefill chunk copies its spilled experts from host memory over PCIe).
 - A few GiB of HBM are left after load. Open-ended greedy decoding (temperature 0) can loop; use `temperature=1`, `top_p=0.95` for chat.
 - Image requests stream the rank-0 vision tower through GPU GEMMs: fine for casual use, not fast.
