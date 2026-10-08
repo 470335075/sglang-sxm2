@@ -17,7 +17,11 @@
 #   GLM53_KV_CACHE_DTYPE=fp8_e4m3   (default auto = FP16; fp8 roughly doubles the
 #                                    pool, so the context default scales with it)
 #   GLM53_MAMBA_SLOTS=12  GLM53_EP_SIZE=1
+#   GLM53_CHUNKED_PREFILL / GLM53_MAX_PREFILL_TOKENS   (default 4096)
 #   GLM53_EXTRA_ARGS="..."     (appended to the launch_server arguments)
+#
+# Prefill chunking: 4096 measured 5.9-8.1% faster end to end than 2048 on long
+# prompts (8x V100-SXM2, 2026-10-05); 8192 OOMs at mem-fraction 0.945.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,8 +126,8 @@ exec "$VENV/bin/python" -m sglang.launch_server \
   --mamba-max-states-per-path 2 \
   --mamba-full-memory-ratio 0.15 \
   --mamba-radix-cache-strategy extra_buffer \
-  --chunked-prefill-size 2048 \
-  --max-prefill-tokens 2048 \
+  --chunked-prefill-size "${GLM53_CHUNKED_PREFILL:-4096}" \
+  --max-prefill-tokens "${GLM53_MAX_PREFILL_TOKENS:-4096}" \
   --warmups prefix_reuse,sampling \
   --sleep-on-idle \
   --context-length "${GLM53_CONTEXT_LENGTH:-$CONTEXT_LENGTH_DEFAULT}" \
