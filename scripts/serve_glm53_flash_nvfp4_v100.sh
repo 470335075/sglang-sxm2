@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Serve RadixArk/GLM-5.3-Flash-NVFP4 (W4A16 Marlin, FP16 activations and KV)
-# on 8x V100-SXM2-32GB, one request at a time, MTP on by default.
+# Serve RadixArk/GLM-5.3-Flash-NVFP4 (W4A16 Marlin, FP16 activations; FP16 or
+# FP8 E4M3 KV) on 8x V100-SXM2-32GB, one request at a time, MTP on by default.
 # Experts are TP-sliced (GLM53_EP_SIZE=1): every rank does the same MoE work
 # per token. With EP8 the other ranks waited on the one holding most routes.
 #
@@ -14,6 +14,8 @@
 #   GLM53_GPUS=0,1,2,3,4,5,6,7
 #   GLM53_MTP_STEPS=3          (0 turns MTP off)
 #   GLM53_CONTEXT_LENGTH / GLM53_MEM_FRACTION   (defaults follow GLM53_MTP_STEPS)
+#   GLM53_KV_CACHE_DTYPE=fp8_e4m3   (default auto = FP16; fp8 roughly doubles the
+#                                    pool, so the context default scales with it)
 #   GLM53_MAMBA_SLOTS=12  GLM53_EP_SIZE=1
 #   GLM53_EXTRA_ARGS="..."     (appended to the launch_server arguments)
 set -euo pipefail
@@ -56,6 +58,17 @@ export SGLANG_DSV41_HIER_AR_PUSH="${SGLANG_DSV41_HIER_AR_PUSH:-1}"
 export SGLANG_SM70_DENSE_GEMV="${SGLANG_SM70_DENSE_GEMV:-1}"
 export PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 
+# --kv-cache-dtype fp8_e4m3 stores the DSA latent as unscaled E4M3 bytes; the SM70
+# sparse MLA kernel widens them back to fp16 while staging rows into shared memory.
+# Per token over the 11 DSA layers that is 12,716 -> 7,084 B, so the KV pool roughly
+# doubles. The Hopper flashmla_kv backend does not exist on sm_70, so this path has
+# to be asked for explicitly; without the env var fp8_e4m3 is rejected at argument
+# resolution rather than picking a backend that cannot load.
+GLM53_KV_CACHE_DTYPE="${GLM53_KV_CACHE_DTYPE:-auto}"
+if [[ "$GLM53_KV_CACHE_DTYPE" == "fp8_e4m3" ]]; then
+  export SGLANG_SM70_DSA_FP8_KV="${SGLANG_SM70_DSA_FP8_KV:-1}"
+fi
+
 # MTP: GLM53_MTP_STEPS=N (default 3) drafts N tokens per step with the checkpoint's
 # layer 45; 0 turns it off. The draft's BF16 routed experts are quantized to NVFP4
 # at load (2.4 -> 1.06 GB per rank); verify still decides every token.
@@ -72,6 +85,13 @@ if [[ "$GLM53_MTP_STEPS" -gt 0 ]]; then
   export SGLANG_NVFP4_CKPT_NVFP4_NEXTN_MOE="${SGLANG_NVFP4_CKPT_NVFP4_NEXTN_MOE:-1}"
   MEM_FRACTION_DEFAULT=0.935
   CONTEXT_LENGTH_DEFAULT=240640
+  if [[ "$GLM53_KV_CACHE_DTYPE" == "fp8_e4m3" ]]; then
+    # Measured on 8x V100-SXM2 with GLM-5.3-Flash-NVFP4: a 521,024-token pool at
+    # 0.945, so this context plus a completion always fits. FP16 tops out at
+    # 290,240 tokens, which is why 240640 is the default above.
+    MEM_FRACTION_DEFAULT=0.945
+    CONTEXT_LENGTH_DEFAULT=480000
+  fi
   SPEC_ARGS=(--speculative-algorithm EAGLE --speculative-draft-model-path "$MODEL"
     --speculative-num-steps "$GLM53_MTP_STEPS" --speculative-eagle-topk 1
     --speculative-num-draft-tokens "$((GLM53_MTP_STEPS + 1))")
@@ -93,7 +113,7 @@ exec "$VENV/bin/python" -m sglang.launch_server \
   --ep-size "${GLM53_EP_SIZE:-1}" \
   --attention-backend dsa \
   --linear-attn-backend triton \
-  --kv-cache-dtype auto \
+  --kv-cache-dtype "$GLM53_KV_CACHE_DTYPE" \
   --disable-custom-all-reduce \
   --disable-prefill-cuda-graph \
   --cuda-graph-bs-decode 1 \
