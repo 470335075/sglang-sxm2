@@ -16,7 +16,10 @@
 #   GLM53_CONTEXT_LENGTH / GLM53_MEM_FRACTION   (defaults follow GLM53_MTP_STEPS)
 #   GLM53_KV_CACHE_DTYPE=fp8_e4m3   (default auto = FP16; fp8 roughly doubles the
 #                                    pool, so the context default scales with it)
-#   GLM53_MAMBA_SLOTS=12  GLM53_EP_SIZE=1
+#   GLM53_MAX_RUNNING=1         (increase with Mamba slots for real batching)
+#   GLM53_MAMBA_SLOTS=12        (4-request batch needs at least 20 slots)
+#   GLM53_CUDA_GRAPH_BS_DECODE=1 (or use GLM53_EXTRA_ARGS for a list, e.g. 1 2 4)
+#   GLM53_EP_SIZE=1
 #   GLM53_CHUNKED_PREFILL / GLM53_MAX_PREFILL_TOKENS   (default 4096)
 #   GLM53_EXTRA_ARGS="..."     (appended to the launch_server arguments)
 #
@@ -69,6 +72,10 @@ export PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 # to be asked for explicitly; without the env var fp8_e4m3 is rejected at argument
 # resolution rather than picking a backend that cannot load.
 GLM53_KV_CACHE_DTYPE="${GLM53_KV_CACHE_DTYPE:-auto}"
+GLM53_MAX_RUNNING="${GLM53_MAX_RUNNING:-1}"
+GLM53_MAMBA_SLOTS="${GLM53_MAMBA_SLOTS:-12}"
+GLM53_CUDA_GRAPH_BS_DECODE="${GLM53_CUDA_GRAPH_BS_DECODE:-1}"
+read -r -a CUDA_GRAPH_BS_DECODE <<< "$GLM53_CUDA_GRAPH_BS_DECODE"
 if [[ "$GLM53_KV_CACHE_DTYPE" == "fp8_e4m3" ]]; then
   export SGLANG_SM70_DSA_FP8_KV="${SGLANG_SM70_DSA_FP8_KV:-1}"
 fi
@@ -78,9 +85,9 @@ fi
 # at load (2.4 -> 1.06 GB per rank); verify still decides every token.
 # Context defaults stay below the KV pool each setting leaves (MTP 242880 at 0.935,
 # no MTP 225600 at 0.88), so prompt + completion always fits.
-# A running request pins 4 of the 12 KDA state slots and admission wants 3 free;
-# the other slots and 2 states per conversation keep a long main session cached
-# while a subagent runs (8 slots evicted it, a 100k re-prefill per subagent call).
+# A running request pins 5 KDA state slots in the no-MTP path. The scheduler caps
+# max_running_requests at max_mamba_cache_size // 5, so a real batch of four needs
+# --max-mamba-cache-size 20. MTP uses a different, larger per-request footprint.
 GLM53_MTP_STEPS="${GLM53_MTP_STEPS:-3}"
 SPEC_ARGS=()
 MEM_FRACTION_DEFAULT=0.88
@@ -120,9 +127,9 @@ exec "$VENV/bin/python" -m sglang.launch_server \
   --kv-cache-dtype "$GLM53_KV_CACHE_DTYPE" \
   --disable-custom-all-reduce \
   --disable-prefill-cuda-graph \
-  --cuda-graph-bs-decode 1 \
-  --max-running-requests 1 \
-  --max-mamba-cache-size "${GLM53_MAMBA_SLOTS:-12}" \
+  --cuda-graph-bs-decode "${CUDA_GRAPH_BS_DECODE[@]}" \
+  --max-running-requests "$GLM53_MAX_RUNNING" \
+  --max-mamba-cache-size "$GLM53_MAMBA_SLOTS" \
   --mamba-max-states-per-path 2 \
   --mamba-full-memory-ratio 0.15 \
   --mamba-radix-cache-strategy extra_buffer \
