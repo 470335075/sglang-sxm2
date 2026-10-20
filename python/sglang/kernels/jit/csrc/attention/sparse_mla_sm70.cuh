@@ -72,6 +72,18 @@ SGL_DEVICE uint4 sparse_mla_sm70_e4m3x8_to_half(uint2 raw) {
   return out;
 }
 
+// Shared-memory byte LUT. Built once per block from the reference converter, so
+// it is bit-identical to sparse_mla_sm70_e4m3x8_to_half, and ~4x cheaper than
+// re-running the software E4M3 decode for every staged row.
+SGL_DEVICE uint4 sparse_mla_sm70_e4m3x8_to_half_lut(uint2 raw, const uint16_t* __restrict__ lut) {
+  uint4 out;
+  out.x = static_cast<uint32_t>(lut[raw.x & 0xffu]) | (static_cast<uint32_t>(lut[(raw.x >> 8) & 0xffu]) << 16);
+  out.y = static_cast<uint32_t>(lut[(raw.x >> 16) & 0xffu]) | (static_cast<uint32_t>(lut[(raw.x >> 24) & 0xffu]) << 16);
+  out.z = static_cast<uint32_t>(lut[raw.y & 0xffu]) | (static_cast<uint32_t>(lut[(raw.y >> 8) & 0xffu]) << 16);
+  out.w = static_cast<uint32_t>(lut[(raw.y >> 16) & 0xffu]) | (static_cast<uint32_t>(lut[(raw.y >> 24) & 0xffu]) << 16);
+  return out;
+}
+
 template <bool kVec16, bool kFp8>
 __global__ void __launch_bounds__(kSparseMlaSm70Threads) sparse_mla_sm70_kernel(SparseMlaSm70Params p) {
   const uint32_t seq = blockIdx.x;
@@ -101,6 +113,17 @@ __global__ void __launch_bounds__(kSparseMlaSm70Threads) sparse_mla_sm70_kernel(
   float l_i = 0.f;
   __shared__ __align__(16) fp16_t s_kv[kSparseMlaSm70Chunk][kSparseMlaSm70Dim];
   __shared__ int32_t s_idx[kSparseMlaSm70Chunk];
+  __shared__ uint16_t s_e4m3_lut[256];  // kFp8 only; two blocks still fit per SM
+
+  if constexpr (kFp8) {
+    // Fill the LUT before the first stage; the __syncthreads() after s_idx covers it.
+    for (int i = threadIdx.x; i < 256; i += kSparseMlaSm70Threads) {
+      const __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(
+          static_cast<__nv_fp8x2_storage_t>(static_cast<uint32_t>(i) | (static_cast<uint32_t>(i) << 8)),
+          __NV_E4M3);
+      s_e4m3_lut[i] = static_cast<uint16_t>(h.x);
+    }
+  }
 
   const int32_t* idx_row = p.indices + static_cast<int64_t>(seq) * p.topk;
   const uint32_t t_begin = split * p.keys_per_split;
@@ -121,7 +144,7 @@ __global__ void __launch_bounds__(kSparseMlaSm70Threads) sparse_mla_sm70_kernel(
         const int32_t idx = s_idx[r];
         if (idx >= 0) {
           const uint2 raw = *reinterpret_cast<const uint2*>(kv8 + static_cast<int64_t>(idx) * p.stride_kv + col);
-          *reinterpret_cast<uint4*>(&s_kv[r][col]) = sparse_mla_sm70_e4m3x8_to_half(raw);
+          *reinterpret_cast<uint4*>(&s_kv[r][col]) = sparse_mla_sm70_e4m3x8_to_half_lut(raw, s_e4m3_lut);
         }
       }
     } else if constexpr (kVec16) {
