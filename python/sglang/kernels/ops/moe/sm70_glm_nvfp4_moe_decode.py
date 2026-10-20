@@ -168,7 +168,14 @@ def sm70_glm_nvfp4_moe_decode(
     topk_weights = topk_weights.reshape(routes).float().contiguous()
     w13_scales = w13_scales.contiguous()
     w2_scales = w2_scales.contiguous()
-    w13_global = w13_global.reshape(-1).float().contiguous()
+    up_global = None
+    if w13_global.ndim == 2:
+        if tuple(w13_global.shape) != (w13.shape[0], 2):
+            raise ValueError("GLM NVFP4 gate/up global scales must have shape [E, 2]")
+        up_global = w13_global[:, 1].float().contiguous()
+        w13_global = w13_global[:, 0].float().contiguous()
+    else:
+        w13_global = w13_global.reshape(-1).float().contiguous()
     w2_global = w2_global.reshape(-1).float().contiguous()
     if w13.dtype != torch.int64 or w2.dtype != torch.int64:
         raise RuntimeError("GLM HMMA decode expects the in-place expert pack")
@@ -189,6 +196,16 @@ def sm70_glm_nvfp4_moe_decode(
             hidden_states, w13_packed, w13_scales, w13_global,
             topk_ids, topk_weights, gate, False, False, 0, group,
         )
+        if up_global is not None:
+            # Apply each projection's global scale in the GEMM epilogue, before
+            # FP16 rounding and activation. Post-rounding ratio correction can
+            # overflow/underflow and is not an equivalent weight decode.
+            up_gate = torch.empty_like(gate)
+            ext.moe_hmma_splitk(
+                hidden_states, w13_packed, w13_scales, up_global,
+                topk_ids, topk_weights, up_gate, False, False, 0, group,
+            )
+            gate[:, intermediate:].copy_(up_gate[:, intermediate:])
         swiglu_clamp(activated, gate, float(swiglu_limit))
         ext.moe_hmma_splitk(
             activated, w2_packed, w2_scales, w2_global,
@@ -200,6 +217,14 @@ def sm70_glm_nvfp4_moe_decode(
         hidden_states, w13_packed, w13_scales, w13_global, topk_ids, topk_weights,
         gate, False, 0, shared.w13_packed, shared.w13_scales, shared.w13_global, batch, group,
     )
+    if up_global is not None:
+        up_gate = torch.empty((routes, 2 * intermediate), dtype=gate.dtype, device=device)
+        ext.moe_hmma_splitk(
+            hidden_states, w13_packed, w13_scales, up_global,
+            topk_ids, topk_weights, up_gate, False, False, 0, group,
+        )
+        # Shared expert scales are independent and its rows need no correction.
+        gate[:routes, intermediate:].copy_(up_gate[:, intermediate:])
     swiglu_clamp(activated, gate, float(swiglu_limit))
     ext.moe_hmma_splitk_shared(
         activated, w2_packed, w2_scales, w2_global, topk_ids, topk_weights,

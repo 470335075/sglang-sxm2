@@ -252,9 +252,17 @@ def fused_marlin_moe(
         and w1_global_scale is not None
         and w2_global_scale is not None
     )
+    w1_up_global_scale = None
     if is_nvfp4_marlin:
         assert w1_global_scale.dtype == torch.float32
         assert w2_global_scale.dtype == torch.float32
+        if w1_global_scale.ndim == 2:
+            if not is_gated or tuple(w1_global_scale.shape) != (w1.shape[0], 2):
+                raise ValueError("NVFP4 gate/up global scales must have shape [E, 2]")
+            if torch.cuda.get_device_capability(hidden_states.device)[0] != 7:
+                raise ValueError("Paired NVFP4 Marlin scales are supported on SM70 only")
+            w1_up_global_scale = w1_global_scale[:, 1].contiguous()
+            w1_global_scale = w1_global_scale[:, 0].contiguous()
     if is_mxfp4_marlin:
         if hidden_states.dtype == torch.float16:
             sm_major = torch.cuda.get_device_capability(hidden_states.device)[0]
@@ -391,6 +399,23 @@ def fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=w1_zeros is not None and w1_zeros.dtype != torch.int32,
     )
+
+    if w1_up_global_scale is not None:
+        # The SM70 Marlin ABI accepts one global scale per expert. A second
+        # GEMM1 supplies the up half's own scale before FP16 rounding. Keep the
+        # original gate half and do not alter checkpoint codes or block scales.
+        up_cache = torch.zeros_like(intermediate_cache1)
+        up_cache = moe_wna16_marlin_gemm(
+            marlin_hidden_states, up_cache, w1, w1_bias, w1_scale,
+            w1_up_global_scale, w1_zeros, g_idx1, sort_indices1, workspace,
+            sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+            moe_block_size=block_size_m, top_k=topk, mul_topk_weights=False,
+            is_ep=is_ep, b_q_type=scalar_type1, size_m=M, size_n=gemm1_n,
+            size_k=K, is_k_full=is_k_full, use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+            is_zp_float=w1_zeros is not None and w1_zeros.dtype != torch.int32,
+        )
+        intermediate_cache1[:, N:].copy_(up_cache[:, N:])
 
     activation_scales = None
     if wide_output_scale != 1.0:

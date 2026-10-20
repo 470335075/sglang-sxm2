@@ -2922,18 +2922,23 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         # Weight processing based on strategy
         if self.is_sm70:
-            # Both SM70 paths consume the checkpoint's per-expert tensor
-            # scales directly. ModelOpt emits matching gate/up scales for a
-            # fused W13 tensor; process_weights_after_loading validated this
-            # above and selected the gate scale.
-            if (
-                layer.moe_runner_config.is_gated
-                and layer.w13_weight_scale_2.dim() == 2
-            ):
-                w13_scale2 = layer.w13_weight_scale_2[:, 0].to(torch.float32)
+            # Preserve independently quantized gate/up global scales. Some
+            # ModelOpt exports share them, but others quantize each projection
+            # separately. Collapsing unequal scales silently distorts the up GEMM.
+            w13_scale2 = layer.w13_weight_scale_2.to(torch.float32)
+            if layer.moe_runner_config.is_gated and w13_scale2.dim() == 2:
+                if w13_scale2.shape[1] != 2:
+                    raise ValueError("SM70 gated NVFP4 expects gate/up scale pairs")
+                if torch.equal(w13_scale2[:, 0], w13_scale2[:, 1]):
+                    w13_scale2 = w13_scale2[:, 0]
+                elif not self.use_sm70_marlin:
+                    raise ValueError(
+                        "SM70 NVFP4 unequal gate/up scales require the Marlin "
+                        "per-projection scale path; portable fallback is unsupported"
+                    )
             else:
-                w13_scale2 = layer.w13_weight_scale_2.to(torch.float32)
-            w13_scale2 = w13_scale2.contiguous().reshape(-1)
+                w13_scale2 = w13_scale2.reshape(-1)
+            w13_scale2 = w13_scale2.contiguous()
             w2_scale2 = (
                 layer.w2_weight_scale_2.to(torch.float32).contiguous().reshape(-1)
             )

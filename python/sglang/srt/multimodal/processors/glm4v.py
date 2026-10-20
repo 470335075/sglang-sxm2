@@ -435,6 +435,9 @@ def _passthrough_video_metadata(video, video_config):
 
 
 class Glm4vImageProcessor(SGLangBaseProcessor):
+    # GLM-5.3 is served language-only on SM70. Keep JPEG decode on CPU so
+    # nvJPEG cannot compete with the model for the last few hundred MiB of VRAM.
+    gpu_image_decode = False
     smart_rgb_conversion = True
     video_preprocessing_device = "cpu"
     models = [
